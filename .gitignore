@@ -1,0 +1,20 @@
+# deps / build
+node_modules/
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# env & secrets — never commit keys
+.env
+.env.*
+!.env.example
+
+# supabase local
+supabase/.temp/
+supabase/.branches/
+
+# os / editor
+Thumbs.db
+.DS_Store
+*.log

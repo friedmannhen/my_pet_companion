@@ -12,6 +12,14 @@ const overlayApi = {
     ipcRenderer.on("overlay:cursor", listener);
     return () => ipcRenderer.removeListener("overlay:cursor", listener);
   },
+  /** Request/release OS keyboard focus — only while a text input is active. */
+  setFocusable(focusable: boolean): void {
+    ipcRenderer.send("overlay:set-focusable", focusable);
+  },
+  /** Opens (or focuses, if already open) the separate stats/details window. */
+  openStats(): void {
+    ipcRenderer.send("overlay:open-stats");
+  },
   quit(): void {
     ipcRenderer.send("overlay:quit");
   },

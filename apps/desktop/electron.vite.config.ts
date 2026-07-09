@@ -19,7 +19,10 @@ export default defineConfig({
     envDir: __dirname,
     build: {
       rollupOptions: {
-        input: resolve(__dirname, "src/index.html"),
+        input: {
+          main: resolve(__dirname, "src/index.html"),
+          stats: resolve(__dirname, "src/stats.html"),
+        },
       },
     },
     plugins: [react()],

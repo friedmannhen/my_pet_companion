@@ -6,7 +6,17 @@
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 import { join } from "node:path";
 
+// Chromium's native-window-occlusion detection (Windows) sees the overlay's
+// always-on-top, screen-spanning window as covering everything below it in
+// Z-order — regardless of its actual pixel transparency — and stops
+// compositing frames for any window it decides is "occluded". That's what
+// left the stats window's DOM fully correct (verified via
+// executeJavaScript) but never visually painting anything. Documented
+// Electron/Chromium workaround: disable the feature outright.
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+
 let overlay: BrowserWindow | null = null;
+let statsWindow: BrowserWindow | null = null;
 
 function createOverlay(): void {
   const { workArea } = screen.getPrimaryDisplay();
@@ -15,14 +25,26 @@ function createOverlay(): void {
     x: workArea.x,
     y: workArea.y,
     width: workArea.width,
-    height: workArea.height,
+    // 1px shy of the full work area on purpose: a borderless window that
+    // exactly matches the monitor/work-area size can trigger Windows' DWM
+    // "borderless fullscreen" heuristic, which suspends compositing of
+    // windows behind it until ours loses focus — a second, independent
+    // cause of the same "background app looks frozen" symptom the
+    // focusable:false fix above addresses from the focus-stealing angle.
+    height: workArea.height - 1,
     transparent: true,
     frame: false,
     resizable: false,
     movable: false,
     hasShadow: false,
     skipTaskbar: true,
-    focusable: true,
+    // Default non-focusable so clicking the pet/menus never steals OS
+    // foreground focus — this is what was causing whatever app the user had
+    // open behind the overlay to visually "freeze": losing foreground focus
+    // makes most apps/games throttle their own rendering, same as clicking
+    // any other window would. setFocusable(true) is only requested briefly,
+    // by the renderer, while a text input (e.g. the auth form) is focused.
+    focusable: false,
     show: false,
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
@@ -69,6 +91,17 @@ function createOverlay(): void {
     }
   });
 
+  // Requested only while a text <input> is actually focused in the renderer
+  // (see focusableInputProps) — everything else (buttons, the radial menu)
+  // works fine receiving clicks while non-focusable.
+  ipcMain.on("overlay:set-focusable", (_evt, focusable: boolean) => {
+    if (!overlay) return;
+    overlay.setFocusable(focusable);
+    if (focusable) overlay.focus();
+  });
+
+  ipcMain.on("overlay:open-stats", () => createOrFocusStatsWindow());
+
   ipcMain.on("overlay:quit", () => app.quit());
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -79,6 +112,47 @@ function createOverlay(): void {
 
   overlay.on("closed", () => {
     overlay = null;
+  });
+}
+
+/**
+ * The detailed stats/quests/achievements view (plan §17: "a separate main
+ * game window", not more clutter on the pet overlay). Ordinary decorated,
+ * resizable, focusable window — none of the overlay's transparency/
+ * click-through/DWM concerns apply here.
+ */
+function createOrFocusStatsWindow(): void {
+  if (statsWindow && !statsWindow.isDestroyed()) {
+    statsWindow.show();
+    statsWindow.focus();
+    return;
+  }
+
+  statsWindow = new BrowserWindow({
+    width: 420,
+    height: 640,
+    title: "My Pet Companion — Details",
+    backgroundColor: "#15151b",
+    webPreferences: {
+      preload: join(__dirname, "../preload/preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    // `new URL` correctly normalizes the slash regardless of whether
+    // ELECTRON_RENDERER_URL already ends in one (a naive template-string
+    // join here previously produced "http://localhost:5173//stats.html",
+    // a 404 that left the window blank).
+    void statsWindow.loadURL(new URL("stats.html", process.env.ELECTRON_RENDERER_URL).toString());
+  } else {
+    void statsWindow.loadFile(join(__dirname, "../renderer/stats.html"));
+  }
+
+  statsWindow.on("closed", () => {
+    statsWindow = null;
   });
 }
 

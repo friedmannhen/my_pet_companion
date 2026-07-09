@@ -1,11 +1,18 @@
 // The actual pet overlay + care loop. Only ever mounted while signed in
 // (see App.tsx) — this repo is online-only by design (plan MVP decision),
 // so no pet exists to render or play with before authentication.
+//
+// UI architecture (per design intent): the overlay shows ONLY the pet and a
+// compact radial interaction menu, QA-hub-style — never a stats/data
+// readout. All progress/history data lives in the separate stats window
+// (stats/StatsApp.tsx, opened via the control strip's 📊 button).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DEFAULT_PET_RULES } from "@pet/core";
+import { AnimatePresence } from "framer-motion";
 import type { AuthState } from "../supabase/useAuth";
 import { usePetGame } from "./usePetGame";
+import { useSessionLease } from "../session/useSessionLease";
 import { AdminPanel } from "./AdminPanel";
+import { RadialMenu, type RadialAction } from "./RadialMenu";
 import catBaby from "../assets/pets/black_cat/black_cat_baby.png";
 import catBabyBlink from "../assets/pets/black_cat/black_cat_baby_blink.png";
 import catAdult from "../assets/pets/black_cat/black_cat_adult.png";
@@ -14,11 +21,11 @@ import catFinal from "../assets/pets/black_cat/black_cat_final.png";
 import catFinalBlink from "../assets/pets/black_cat/black_cat_final_blink.png";
 import catFinalSleep from "../assets/pets/black_cat/black_cat__final_sleep.png";
 
-const SYNC_LABEL: Record<string, { text: string; color: string }> = {
-  offline: { text: "● local only", color: "#9ca3af" },
-  loading: { text: "● syncing…", color: "#fbbf24" },
-  synced: { text: "● cloud synced", color: "#34d399" },
-  error: { text: "● sync error", color: "#f87171" },
+const SYNC_COLOR: Record<string, string> = {
+  offline: "#9ca3af",
+  loading: "#fbbf24",
+  synced: "#34d399",
+  error: "#f87171",
 };
 
 const PET_SIZE = 128;
@@ -40,46 +47,19 @@ const SPRITES: Record<number, { idle: string; blink: string; sleep?: string }> =
   3: { idle: catFinal, blink: catFinalBlink, sleep: catFinalSleep },
 };
 
-function StatBar({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
-      <span style={{ width: 62, textAlign: "right", opacity: 0.85 }}>{label}</span>
-      <div
-        style={{
-          flex: 1,
-          height: 8,
-          borderRadius: 4,
-          background: "rgba(255,255,255,0.15)",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            width: `${Math.round(value)}%`,
-            height: "100%",
-            borderRadius: 4,
-            background: color,
-            transition: "width 0.3s ease",
-          }}
-        />
-      </div>
-      <span style={{ width: 26, opacity: 0.7 }}>{Math.round(value)}</span>
-    </div>
-  );
-}
-
-const btnStyle: React.CSSProperties = {
+const chipStyle: React.CSSProperties = {
   cursor: "pointer",
   border: "none",
-  borderRadius: 8,
-  padding: "6px 10px",
-  fontSize: 13,
+  borderRadius: 7,
+  padding: "4px 8px",
+  fontSize: 11,
   background: "rgba(255,255,255,0.12)",
   color: "#fff",
 };
 
 export function GameView({ auth, clickable }: { auth: AuthState; clickable: boolean }) {
   const game = usePetGame(auth.userId);
+  const lease = useSessionLease(auth.userId);
   const { save } = game;
   const petRef = useRef<HTMLDivElement>(null);
   const pos = useRef<Vec>({ x: 200, y: 200 });
@@ -88,13 +68,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const [blinking, setBlinking] = useState(false);
   const [facingLeft, setFacingLeft] = useState(false);
   const [hearts, setHearts] = useState<{ id: number; emoji: string; x: number; y: number }[]>([]);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const stationary = save.isSleeping || !save.isAlive || game.isEgg;
 
   // Wander loop — plain rAF lerp toward a random target with idle pauses.
-  // Paused while the pet is an egg, sleeping, dead, or its panel is open.
-  const wanderHalted = stationary || panelOpen;
+  // Paused while the pet is an egg, sleeping, dead, or the radial menu is open.
+  const wanderHalted = stationary || menuOpen;
   const wanderHaltedRef = useRef(wanderHalted);
   wanderHaltedRef.current = wanderHalted;
 
@@ -153,11 +133,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     };
   }, []);
 
-  // Hit-testing runs once at the App root (useHitTest) so it also covers the
-  // signed-out screens; `clickable` here is just for the dev badge below.
-
   // Hold-to-warm (hub-style egg mini-game): holding the pointer on the egg
-  // pulses warmth/points every 200ms; a short press just toggles the panel.
+  // pulses warmth/points every 200ms; a short press just no-ops (egg has no
+  // radial menu — Stats is reached via the always-visible control strip).
   const [warming, setWarming] = useState(false);
   const holdRef = useRef<{ interval?: ReturnType<typeof setInterval>; heldLong: boolean }>({
     heldLong: false,
@@ -165,12 +143,11 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const gameRef = useRef(game);
   gameRef.current = game;
 
-  const stopWarmHold = useCallback((togglePanelOnTap: boolean) => {
+  const stopWarmHold = useCallback(() => {
     const hold = holdRef.current;
     if (hold.interval) clearInterval(hold.interval);
     hold.interval = undefined;
     setWarming(false);
-    if (togglePanelOnTap && !hold.heldLong) setPanelOpen((o) => !o);
   }, []);
 
   const startWarmHold = useCallback(() => {
@@ -197,7 +174,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, []);
 
   const act = useCallback(
-    (fn: () => void, emoji: string) => () => {
+    (fn: () => void, emoji: string) => {
       fn();
       burst(emoji);
     },
@@ -237,6 +214,30 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     save.isAlive &&
     !save.isSleeping &&
     ((game.isEgg ? save.warmth : save.hunger) < 25 || save.cleanliness < 25 || save.happiness < 25);
+
+  const radialActions: RadialAction[] = [
+    { key: "feed", icon: "🍖", label: "Feed", onClick: () => act(game.feed, "🍖"), disabled: save.isSleeping },
+    { key: "wash", icon: "🧼", label: "Wash", onClick: () => act(game.wash, "🫧"), disabled: save.isSleeping },
+    { key: "pet", icon: "🤗", label: "Pet", onClick: () => act(game.pet, "❤️"), disabled: save.isSleeping },
+    { key: "ball", icon: "⚾", label: "Ball", onClick: () => act(game.throwBall, "⚾"), disabled: save.isSleeping },
+    {
+      key: "sleep",
+      icon: save.isSleeping ? "☀️" : "🌙",
+      label: save.isSleeping ? "Wake" : "Tuck in",
+      onClick: game.toggleSleep,
+    },
+  ];
+  if (game.canEvolve) {
+    radialActions.push({
+      key: "evolve",
+      icon: "✨",
+      label: "Evolve!",
+      onClick: () => act(game.hatchOrEvolve, "✨"),
+      highlight: true,
+    });
+  }
+
+  const showRadial = !game.isEgg && save.isAlive && menuOpen;
 
   return (
     <>
@@ -278,10 +279,60 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       ))}
       <style>{`@keyframes float-up { to { transform: translateY(-48px); opacity: 0; } }`}</style>
 
+      {/* Compact always-visible control strip — app/account controls, not game data. */}
+      <div
+        data-interactive
+        style={{
+          position: "fixed",
+          bottom: 12,
+          right: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 8px",
+          borderRadius: 10,
+          background: "rgba(20,20,26,0.85)",
+          fontFamily: "'Segoe UI', system-ui, sans-serif",
+        }}
+      >
+        <span
+          title={game.syncError ?? game.syncStatus}
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: SYNC_COLOR[game.syncStatus],
+            flexShrink: 0,
+          }}
+        />
+        {lease.status === "conflict" && (
+          <button
+            style={{ ...chipStyle, background: "rgba(248,113,113,0.35)" }}
+            onClick={lease.forceTakeover}
+            title={
+              lease.conflict
+                ? `Active on ${lease.conflict.deviceType} — click to take over here`
+                : "Active elsewhere"
+            }
+          >
+            ⚠️ Take over
+          </button>
+        )}
+        <button style={chipStyle} onClick={() => window.overlay.openStats()}>
+          📊 Stats
+        </button>
+        <button style={chipStyle} onClick={auth.signOut}>
+          Sign out
+        </button>
+        <button style={{ ...chipStyle, opacity: 0.7 }} onClick={() => window.overlay.quit()}>
+          Quit
+        </button>
+      </div>
+
       <div
         ref={petRef}
         data-interactive
-        style={{ position: "fixed", left: 0, top: 0, width: PET_SIZE }}
+        style={{ position: "fixed", left: 0, top: 0, width: PET_SIZE, height: PET_SIZE }}
       >
         {/* Status blips above the pet */}
         {save.isSleeping && save.isAlive && (
@@ -301,11 +352,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         )}
 
         <div
-          // Egg: hold to warm (tap = panel). Hatched pet: click = panel.
-          onClick={game.isEgg && save.isAlive ? undefined : () => setPanelOpen((o) => !o)}
+          // Egg: hold to warm. Hatched + alive: click toggles the radial menu.
+          // Dead: click toggles the small "start over" bubble.
+          onClick={game.isEgg ? undefined : () => setMenuOpen((o) => !o)}
           onPointerDown={game.isEgg && save.isAlive ? startWarmHold : undefined}
-          onPointerUp={game.isEgg && save.isAlive ? () => stopWarmHold(true) : undefined}
-          onPointerLeave={game.isEgg && save.isAlive ? () => stopWarmHold(false) : undefined}
+          onPointerUp={game.isEgg && save.isAlive ? stopWarmHold : undefined}
+          onPointerLeave={game.isEgg && save.isAlive ? stopWarmHold : undefined}
           style={{
             cursor: "pointer",
             width: PET_SIZE,
@@ -335,13 +387,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           <style>{`@keyframes flame-pulse { from { transform: translateX(-50%) scale(0.9); } to { transform: translateX(-50%) scale(1.15); } }`}</style>
         </div>
 
-        {panelOpen && (
+        <AnimatePresence>
+          {showRadial && <RadialMenu key="radial" actions={radialActions} />}
+        </AnimatePresence>
+
+        {!save.isAlive && menuOpen && (
           <div
+            data-interactive
             style={{
               position: "absolute",
               top: PET_SIZE + 6,
-              left: -60,
-              width: 250,
+              left: -40,
+              width: 210,
               display: "flex",
               flexDirection: "column",
               gap: 8,
@@ -350,155 +407,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               background: "rgba(22,22,28,0.94)",
               color: "#fff",
               fontFamily: "'Segoe UI', system-ui, sans-serif",
+              fontSize: 13,
               boxShadow: "0 4px 18px rgba(0,0,0,0.5)",
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <strong style={{ fontSize: 14 }}>{save.name}</strong>
-              <span style={{ fontSize: 11, opacity: 0.7 }}>
-                {["Egg", "Baby", "Adult", "Final"][save.evolutionStage]}
-                {" · "}
-                {Math.floor(save.carePoints)}
-                {game.nextThreshold !== null && ` / ${game.nextThreshold}`} pts
-              </span>
-            </div>
-
-            <div style={{ fontSize: 10, opacity: 0.6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <span>
-                Age {Math.max(0, Math.floor((Date.now() - new Date(save.birthDate).getTime()) / 86_400_000))}d
-              </span>
-              <span>🍖 {save.feedCount}</span>
-              <span>🧼 {save.washCount}</span>
-              <span>🤗 {save.petCount}</span>
-              <span>⚾ {save.throwBallCount}</span>
-            </div>
-
-            {save.isSleeping && save.sleepKind === "manual" && save.sleepStartedAt && (
-              <div style={{ fontSize: 11, color: "#93c5fd" }}>
-                🛡️ Protected sleep:{" "}
-                {Math.max(
-                  0,
-                  Math.ceil(
-                    (new Date(save.sleepStartedAt).getTime() +
-                      DEFAULT_PET_RULES.sleep.protectedMaxMs -
-                      Date.now()) /
-                      3_600_000,
-                  ),
-                )}
-                h left
-              </div>
-            )}
-
-            {!save.isAlive ? (
-              <>
-                <div style={{ fontSize: 13, opacity: 0.9 }}>
-                  {save.name} didn&apos;t make it… 💔
-                </div>
-                <button style={btnStyle} onClick={game.restart}>
-                  🥚 Start over
-                </button>
-              </>
-            ) : (
-              <>
-                {game.isEgg ? (
-                  <StatBar label="Warmth" value={save.warmth} color="#f59e0b" />
-                ) : (
-                  <StatBar label="Hunger" value={save.hunger} color="#ef4444" />
-                )}
-                <StatBar label="Clean" value={save.cleanliness} color="#38bdf8" />
-                <StatBar label="Happy" value={save.happiness} color="#a78bfa" />
-                {/* Evolution progress */}
-                <StatBar
-                  label={save.evolutionStage >= 3 ? "Max" : "Next form"}
-                  value={game.evolutionProgress * 100}
-                  color="#34d399"
-                />
-
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {game.isEgg ? (
-                    <span style={{ fontSize: 11, opacity: 0.75, alignSelf: "center" }}>
-                      🔥 Press and hold the egg to warm it
-                    </span>
-                  ) : (
-                    <>
-                      <button style={btnStyle} onClick={act(game.feed, "🍖")} disabled={save.isSleeping}>
-                        🍖 Feed
-                      </button>
-                      <button style={btnStyle} onClick={act(game.wash, "🫧")} disabled={save.isSleeping}>
-                        🧼 Wash
-                      </button>
-                      <button style={btnStyle} onClick={act(game.pet, "❤️")} disabled={save.isSleeping}>
-                        🤗 Pet
-                      </button>
-                      <button style={btnStyle} onClick={act(game.throwBall, "⚾")} disabled={save.isSleeping}>
-                        ⚾ Ball
-                      </button>
-                    </>
-                  )}
-                  {(game.canHatch || game.canEvolve) && (
-                    <button
-                      style={{ ...btnStyle, background: "rgba(52,211,153,0.35)" }}
-                      onClick={act(game.hatchOrEvolve, "✨")}
-                    >
-                      ✨ {game.canHatch ? "Hatch!" : "Evolve!"}
-                    </button>
-                  )}
-                  {!game.isEgg && (
-                    <button style={btnStyle} onClick={game.toggleSleep}>
-                      {save.isSleeping ? "☀️ Wake" : "🌙 Tuck in"}
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* Account + sync status */}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: 10,
-                opacity: 0.8,
-                borderTop: "1px solid rgba(255,255,255,0.08)",
-                paddingTop: 6,
-              }}
-            >
-              <span
-                style={{ color: SYNC_LABEL[game.syncStatus]?.color }}
-                title={game.syncError ?? undefined}
-              >
-                {SYNC_LABEL[game.syncStatus]?.text}
-              </span>
-              <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={{ opacity: 0.6, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {auth.email}
-                </span>
-                <button style={{ ...btnStyle, fontSize: 10, padding: "2px 6px" }} onClick={auth.signOut}>
-                  Sign out
-                </button>
-              </span>
-            </div>
-            {game.syncStatus === "error" && game.syncError && (
-              <div style={{ fontSize: 10, color: "#fca5a5", wordBreak: "break-word" }}>
-                {game.syncError}
-              </div>
-            )}
-
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
-              <button
-                style={{ ...btnStyle, fontSize: 11, padding: "4px 8px" }}
-                onClick={() => setPanelOpen(false)}
-              >
-                Close
-              </button>
-              <button
-                style={{ ...btnStyle, fontSize: 11, padding: "4px 8px", opacity: 0.7 }}
-                onClick={() => window.overlay.quit()}
-              >
-                Quit
-              </button>
-            </div>
+            <span>{save.name} didn&apos;t make it… 💔</span>
+            <button style={chipStyle} onClick={game.restart}>
+              🥚 Start over
+            </button>
           </div>
         )}
       </div>

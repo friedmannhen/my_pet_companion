@@ -1,10 +1,37 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AuthState } from "./useAuth";
 
 // Compact sign-in card. Email/password only for now (no OAuth redirect flow
 // in Electron yet — Google/Microsoft loopback OAuth is a follow-up). Rendered
 // as a data-interactive panel so the overlay accepts clicks over it.
+//
+// Focus handling: a per-field onFocus/onBlur IPC round-trip was tried here
+// first (grab OS focus only while a specific input is active) but proved
+// racy — synthetic keystrokes sent right after a click landed in whatever
+// window was previously foreground, because the renderer->main IPC call to
+// actually activate the window hadn't completed yet. This screen is
+// short-lived and only shown once per session, so the simpler fix is to keep
+// the window focusable for its whole mounted lifetime instead. GameView's
+// day-to-day pet interactions are what actually needed to stay non-focusable
+// to fix the "background app freezes" bug, and those use plain
+// buttons/clicks that never request focus at all.
+//
+// Even with the window itself focusable, React's own `autoFocus` still
+// fires too early (during the DOM commit, before our IPC call has made the
+// native window OS-focusable) — so it silently no-ops. Focusing the input
+// explicitly, one tick after granting window focus, is what actually works.
 export function AuthPanel({ auth }: { auth: AuthState }) {
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    window.overlay.setFocusable(true);
+    const t = setTimeout(() => emailRef.current?.focus(), 50);
+    return () => {
+      clearTimeout(t);
+      window.overlay.setFocusable(false);
+    };
+  }, []);
+
   const [mode, setMode] = useState<"in" | "up">("in");
   const [email, setEmail] = useState(auth.lastEmail);
   const [password, setPassword] = useState("");
@@ -69,11 +96,11 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
       </span>
 
       <input
+        ref={emailRef}
         style={input}
         type="email"
         placeholder="email"
         value={email}
-        autoFocus
         onChange={(e) => {
           setEmail(e.target.value);
           auth.clearError();

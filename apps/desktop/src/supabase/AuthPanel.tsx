@@ -2,15 +2,25 @@ import { useState } from "react";
 import type { AuthState } from "./useAuth";
 
 // Compact sign-in card. Email/password only for now (no OAuth redirect flow
-// in Electron yet — Google/Discord loopback OAuth is a follow-up). Rendered
+// in Electron yet — Google/Microsoft loopback OAuth is a follow-up). Rendered
 // as a data-interactive panel so the overlay accepts clicks over it.
 export function AuthPanel({ auth }: { auth: AuthState }) {
   const [mode, setMode] = useState<"in" | "up">("in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const passwordsMismatch =
+    mode === "up" && confirmPassword.length > 0 && password !== confirmPassword;
+  const canSubmit =
+    !busy &&
+    !!email &&
+    password.length >= 6 &&
+    (mode === "in" || (confirmPassword.length >= 6 && !passwordsMismatch));
+
   const submit = async () => {
+    if (!canSubmit) return;
     setBusy(true);
     if (mode === "in") await auth.signIn(email.trim(), password);
     else await auth.signUp(email.trim(), password);
@@ -24,6 +34,12 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
     background: "rgba(255,255,255,0.06)",
     color: "#fff",
     fontSize: 13,
+  };
+
+  const switchMode = () => {
+    setMode((m) => (m === "in" ? "up" : "in"));
+    setConfirmPassword("");
+    auth.clearError();
   };
 
   return (
@@ -72,23 +88,39 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
           setPassword(e.target.value);
           auth.clearError();
         }}
-        onKeyDown={(e) => e.key === "Enter" && !busy && submit()}
+        onKeyDown={(e) => e.key === "Enter" && mode === "in" && submit()}
       />
-
-      {auth.error && (
-        <span style={{ fontSize: 11, color: "#fca5a5" }}>{auth.error}</span>
+      {mode === "up" && (
+        <input
+          style={input}
+          type="password"
+          placeholder="confirm password"
+          value={confirmPassword}
+          onChange={(e) => {
+            setConfirmPassword(e.target.value);
+            auth.clearError();
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
+      )}
+      {passwordsMismatch && (
+        <span style={{ fontSize: 11, color: "#fca5a5" }}>Passwords don&apos;t match.</span>
       )}
 
+      {auth.error && <span style={{ fontSize: 11, color: "#fca5a5" }}>{auth.error}</span>}
+      {auth.notice && <span style={{ fontSize: 11, color: "#93c5fd" }}>{auth.notice}</span>}
+
       <button
-        disabled={busy || !email || password.length < 6}
+        disabled={!canSubmit}
         onClick={submit}
         style={{
-          cursor: "pointer",
+          cursor: canSubmit ? "pointer" : "default",
           border: "none",
           borderRadius: 8,
           padding: "9px 10px",
           fontSize: 14,
           fontWeight: 600,
+          opacity: canSubmit ? 1 : 0.5,
           background: busy ? "rgba(52,211,153,0.4)" : "rgba(52,211,153,0.85)",
           color: "#062a1a",
         }}
@@ -97,10 +129,7 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
       </button>
 
       <button
-        onClick={() => {
-          setMode((m) => (m === "in" ? "up" : "in"));
-          auth.clearError();
-        }}
+        onClick={switchMode}
         style={{
           cursor: "pointer",
           border: "none",
@@ -110,6 +139,23 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
         }}
       >
         {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
+      </button>
+
+      <button
+        onClick={() => window.overlay.quit()}
+        style={{
+          alignSelf: "flex-end",
+          cursor: "pointer",
+          border: "none",
+          borderRadius: 8,
+          padding: "4px 10px",
+          fontSize: 11,
+          background: "rgba(255,255,255,0.12)",
+          color: "#fff",
+          opacity: 0.7,
+        }}
+      >
+        Quit
       </button>
     </div>
   );

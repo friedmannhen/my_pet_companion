@@ -53,6 +53,8 @@ function applyDecay(save: PetSaveData): PetSaveData {
 export interface PetGame {
   save: PetSaveData;
   syncStatus: SyncStatus;
+  /** The last Postgres/PostgREST error message, if syncStatus === "error". */
+  syncError: string | null;
   isEgg: boolean;
   canHatch: boolean;
   canEvolve: boolean;
@@ -83,6 +85,7 @@ export function usePetGame(userId: string | null): PetGame {
   // Offline catch-up happens once at load, before first render uses the save.
   const [save, setSave] = useState<PetSaveData>(() => applyDecay(loadSave()));
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
+  const [syncError, setSyncError] = useState<string | null>(null);
   const saveRef = useRef(save);
   saveRef.current = save;
 
@@ -115,6 +118,8 @@ export function usePetGame(userId: string | null): PetGame {
         .maybeSingle();
       if (cancelled) return;
       if (error) {
+        console.error("[pet-sync] load failed:", error);
+        setSyncError(`load: ${error.message} (${error.code ?? "no code"})`);
         setSyncStatus("error");
         return;
       }
@@ -127,10 +132,13 @@ export function usePetGame(userId: string | null): PetGame {
           .insert(saveToRow(seeded, userId));
         if (cancelled) return;
         if (insErr) {
+          console.error("[pet-sync] seed insert failed:", insErr);
+          setSyncError(`insert: ${insErr.message} (${insErr.code ?? "no code"})`);
           setSyncStatus("error");
           return;
         }
       }
+      setSyncError(null);
       setSyncStatus("synced");
     })();
     return () => {
@@ -147,6 +155,12 @@ export function usePetGame(userId: string | null): PetGame {
       const { error } = await supabase!
         .from("pets")
         .upsert(saveToRow(saveRef.current, userId), { onConflict: "user_id,pet_type" });
+      if (error) {
+        console.error("[pet-sync] push failed:", error);
+        setSyncError(`push: ${error.message} (${error.code ?? "no code"})`);
+      } else {
+        setSyncError(null);
+      }
       setSyncStatus(error ? "error" : "synced");
     }, 2000);
     return () => {
@@ -293,6 +307,7 @@ export function usePetGame(userId: string | null): PetGame {
   return {
     save,
     syncStatus,
+    syncError,
     isEgg,
     canHatch: isEgg && canEvolveNow,
     canEvolve: !isEgg && canEvolveNow,

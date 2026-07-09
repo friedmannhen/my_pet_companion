@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@pet/core": "workspace:*",
+    "@supabase/supabase-js": "^2.110.1",
     "framer-motion": "^12.0.0",
     "react": "catalog:",
     "react-dom": "catalog:"

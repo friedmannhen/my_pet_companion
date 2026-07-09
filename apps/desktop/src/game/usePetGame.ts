@@ -15,6 +15,8 @@ import {
   type EvolutionStage,
   type PetSaveData,
 } from "@pet/core";
+import { supabase } from "../supabase/client";
+import { rowToSave, saveToRow, type PetRow } from "../supabase/petRow";
 
 const rules = DEFAULT_PET_RULES;
 const SAVE_KEY = "mpc_pet_save_cat";
@@ -50,6 +52,7 @@ function applyDecay(save: PetSaveData): PetSaveData {
 
 export interface PetGame {
   save: PetSaveData;
+  syncStatus: SyncStatus;
   isEgg: boolean;
   canHatch: boolean;
   canEvolve: boolean;
@@ -74,13 +77,16 @@ export interface PetGame {
   debugTimeJump: (hours: number) => void;
 }
 
-export function usePetGame(): PetGame {
+export type SyncStatus = "offline" | "loading" | "synced" | "error";
+
+export function usePetGame(userId: string | null): PetGame {
   // Offline catch-up happens once at load, before first render uses the save.
   const [save, setSave] = useState<PetSaveData>(() => applyDecay(loadSave()));
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
   const saveRef = useRef(save);
   saveRef.current = save;
 
-  // Persist on every change.
+  // localStorage is the always-on offline cache regardless of auth.
   useEffect(() => {
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify(save));
@@ -88,6 +94,65 @@ export function usePetGame(): PetGame {
       /* quota */
     }
   }, [save]);
+
+  // ── Cloud load on sign-in ────────────────────────────────────────────────
+  // Owner reads/writes its own pets row directly (RLS: "pets: owner full
+  // access"). Cloud is authoritative when a row exists (server last_decay_tick
+  // drives correct decay); otherwise the local save is pushed up as the seed.
+  useEffect(() => {
+    if (!supabase || !userId) {
+      setSyncStatus("offline");
+      return;
+    }
+    let cancelled = false;
+    setSyncStatus("loading");
+    (async () => {
+      const { data, error } = await supabase
+        .from("pets")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("pet_type", "cat")
+        .maybeSingle();
+      if (cancelled) return;
+      if (error) {
+        setSyncStatus("error");
+        return;
+      }
+      if (data) {
+        setSave(applyDecay(rowToSave(data as PetRow)));
+      } else {
+        const seeded = saveRef.current;
+        const { error: insErr } = await supabase
+          .from("pets")
+          .insert(saveToRow(seeded, userId));
+        if (cancelled) return;
+        if (insErr) {
+          setSyncStatus("error");
+          return;
+        }
+      }
+      setSyncStatus("synced");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  // ── Cloud push (debounced) ───────────────────────────────────────────────
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    if (!supabase || !userId || syncStatus === "loading") return;
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(async () => {
+      const { error } = await supabase!
+        .from("pets")
+        .upsert(saveToRow(saveRef.current, userId), { onConflict: "user_id,pet_type" });
+      setSyncStatus(error ? "error" : "synced");
+    }, 2000);
+    return () => {
+      if (pushTimer.current) clearTimeout(pushTimer.current);
+    };
+  }, [save, userId, syncStatus]);
 
   // Live decay tick — same replay path as offline catch-up.
   useEffect(() => {
@@ -227,6 +292,7 @@ export function usePetGame(): PetGame {
 
   return {
     save,
+    syncStatus,
     isEgg,
     canHatch: isEgg && canEvolveNow,
     canEvolve: !isEgg && canEvolveNow,

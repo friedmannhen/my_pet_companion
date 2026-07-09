@@ -15,6 +15,8 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, "src"),
+    // .env lives in apps/desktop, not the renderer root (src).
+    envDir: __dirname,
     build: {
       rollupOptions: {
         input: resolve(__dirname, "src/index.html"),

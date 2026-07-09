@@ -2,6 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_PET_RULES } from "@pet/core";
 import { usePetGame } from "./game/usePetGame";
 import { AdminPanel } from "./game/AdminPanel";
+import { useAuth } from "./supabase/useAuth";
+import { AuthPanel } from "./supabase/AuthPanel";
+
+const SYNC_LABEL: Record<string, { text: string; color: string }> = {
+  offline: { text: "● local only", color: "#9ca3af" },
+  loading: { text: "● syncing…", color: "#fbbf24" },
+  synced: { text: "● cloud synced", color: "#34d399" },
+  error: { text: "● sync error", color: "#f87171" },
+};
 import catBaby from "./assets/pets/black_cat/black_cat_baby.png";
 import catBabyBlink from "./assets/pets/black_cat/black_cat_baby_blink.png";
 import catAdult from "./assets/pets/black_cat/black_cat_adult.png";
@@ -68,7 +77,8 @@ const btnStyle: React.CSSProperties = {
 };
 
 export function App() {
-  const game = usePetGame();
+  const auth = useAuth();
+  const game = usePetGame(auth.userId);
   const { save } = game;
   const petRef = useRef<HTMLDivElement>(null);
   const pos = useRef<Vec>({ x: 200, y: 200 });
@@ -267,6 +277,8 @@ export function App() {
 
       {import.meta.env.DEV && <AdminPanel game={game} />}
 
+      {auth.configured && !auth.loading && !auth.session && <AuthPanel auth={auth} />}
+
       {hearts.map((h) => (
         <div
           key={h.id}
@@ -457,6 +469,38 @@ export function App() {
                 </div>
               </>
             )}
+
+            {/* Account + sync status */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: 10,
+                opacity: 0.8,
+                borderTop: "1px solid rgba(255,255,255,0.08)",
+                paddingTop: 6,
+              }}
+            >
+              <span style={{ color: SYNC_LABEL[game.syncStatus]?.color }}>
+                {SYNC_LABEL[game.syncStatus]?.text}
+              </span>
+              {auth.session ? (
+                <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <span style={{ opacity: 0.6, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {auth.email}
+                  </span>
+                  <button
+                    style={{ ...btnStyle, fontSize: 10, padding: "2px 6px" }}
+                    onClick={auth.signOut}
+                  >
+                    Sign out
+                  </button>
+                </span>
+              ) : (
+                <span style={{ opacity: 0.6 }}>{auth.configured ? "not signed in" : "no backend"}</span>
+              )}
+            </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
               <button

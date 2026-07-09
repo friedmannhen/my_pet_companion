@@ -6,7 +6,7 @@ import type { AuthState } from "./useAuth";
 // as a data-interactive panel so the overlay accepts clicks over it.
 export function AuthPanel({ auth }: { auth: AuthState }) {
   const [mode, setMode] = useState<"in" | "up">("in");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(auth.lastEmail);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -106,6 +106,24 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
       {passwordsMismatch && (
         <span style={{ fontSize: 11, color: "#fca5a5" }}>Passwords don&apos;t match.</span>
       )}
+
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 11,
+          opacity: 0.85,
+          cursor: "pointer",
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={auth.rememberMe}
+          onChange={(e) => auth.setRememberMe(e.target.checked)}
+        />
+        Remember me on this device
+      </label>
 
       {auth.error && <span style={{ fontSize: 11, color: "#fca5a5" }}>{auth.error}</span>}
       {auth.notice && <span style={{ fontSize: 11, color: "#93c5fd" }}>{auth.notice}</span>}

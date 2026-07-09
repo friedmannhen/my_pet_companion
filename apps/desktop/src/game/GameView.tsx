@@ -78,7 +78,7 @@ const btnStyle: React.CSSProperties = {
   color: "#fff",
 };
 
-export function GameView({ auth }: { auth: AuthState }) {
+export function GameView({ auth, clickable }: { auth: AuthState; clickable: boolean }) {
   const game = usePetGame(auth.userId);
   const { save } = game;
   const petRef = useRef<HTMLDivElement>(null);
@@ -87,7 +87,6 @@ export function GameView({ auth }: { auth: AuthState }) {
   const pauseUntil = useRef(0);
   const [blinking, setBlinking] = useState(false);
   const [facingLeft, setFacingLeft] = useState(false);
-  const [clickable, setClickable] = useState(false);
   const [hearts, setHearts] = useState<{ id: number; emoji: string; x: number; y: number }[]>([]);
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -154,24 +153,8 @@ export function GameView({ auth }: { auth: AuthState }) {
     };
   }, []);
 
-  // Hit-testing: the window is click-through everywhere except while the
-  // cursor is over an element marked data-interactive. The main process
-  // streams the OS cursor position (~12Hz) because neither mouseenter nor raw
-  // mousemove reach an ignored window on Win10 + Electron 33 despite
-  // { forward: true } (verified in the overlay spike).
-  const clickableRef = useRef(false);
-  useEffect(() => {
-    const off = window.overlay.onCursor(({ x, y }) => {
-      const el = document.elementFromPoint(x, y);
-      const interactive = !!el?.closest("[data-interactive]");
-      if (interactive !== clickableRef.current) {
-        clickableRef.current = interactive;
-        window.overlay.setClickable(interactive);
-        setClickable(interactive);
-      }
-    });
-    return off;
-  }, []);
+  // Hit-testing runs once at the App root (useHitTest) so it also covers the
+  // signed-out screens; `clickable` here is just for the dev badge below.
 
   // Hold-to-warm (hub-style egg mini-game): holding the pointer on the egg
   // pulses warmth/points every 200ms; a short press just toggles the panel.

@@ -5,6 +5,7 @@
 import { useAuth } from "./supabase/useAuth";
 import { AuthPanel } from "./supabase/AuthPanel";
 import { GameView } from "./game/GameView";
+import { useHitTest } from "./overlay/useHitTest";
 
 function CenteredCard({ children }: { children: React.ReactNode }) {
   return (
@@ -50,6 +51,10 @@ function CenteredCard({ children }: { children: React.ReactNode }) {
 
 export function App() {
   const auth = useAuth();
+  // Must run unconditionally here (not inside GameView) — every screen
+  // (auth card, loading, error) needs click-through toggling to work, not
+  // just the signed-in pet overlay.
+  const clickable = useHitTest();
 
   if (!auth.configured) {
     return (
@@ -71,5 +76,5 @@ export function App() {
     return <AuthPanel auth={auth} />;
   }
 
-  return <GameView auth={auth} />;
+  return <GameView auth={auth} clickable={clickable} />;
 }

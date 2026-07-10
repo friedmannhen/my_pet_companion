@@ -12,15 +12,7 @@
 // usePetMovement.ts / PetOverlay.tsx / PetEffects.tsx — see those files'
 // history for the original reference implementation this was studied from.
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  AnimatePresence,
-  animate,
-  motion,
-  useDragControls,
-  useMotionValue,
-  useSpring,
-  useTransform,
-} from "framer-motion";
+import { AnimatePresence, animate, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import type { AuthState } from "../supabase/useAuth";
 import { usePetGame } from "./usePetGame";
 import { useSessionLease } from "../session/useSessionLease";
@@ -89,6 +81,10 @@ interface DeltaPopup {
 function fmtDelta(v: number): string {
   const rounded = Math.abs(v) >= 10 ? Math.round(v) : Math.round(v * 10) / 10;
   return `${v > 0 ? "+" : ""}${rounded}`;
+}
+
+function fmtCooldown(ms: number): string {
+  return ms >= 60_000 ? `${Math.ceil(ms / 60_000)}m` : `${Math.max(1, Math.ceil(ms / 1000))}s`;
 }
 
 export function GameView({ auth, clickable }: { auth: AuthState; clickable: boolean }) {
@@ -230,6 +226,17 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     wasAliveRef.current = save.isAlive;
   }, [save.isAlive, sfx]);
 
+  // Overheat warning particles — burst once as it starts, matching how
+  // other one-shot pulses (pulseHappy etc.) already work here.
+  const wasOverheatingRef = useRef(false);
+  useEffect(() => {
+    if (!wasOverheatingRef.current && game.isEggOverheating) {
+      setFxTrigger("overheated");
+      setTimeout(() => setFxTrigger((t) => (t === "overheated" ? null : t)), 1600);
+    }
+    wasOverheatingRef.current = game.isEggOverheating;
+  }, [game.isEggOverheating]);
+
   // Petting cooldown (ERP_QA_HUB's petRules.actionCooldowns.petMs) — without
   // this, Pet is a free, instantly-repeatable happiness/care-point source.
   const [petCooldownMs, setPetCooldownMs] = useState(0);
@@ -278,13 +285,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, []);
 
   // ── Feed: grab a piece off the SideDock pile, drag, release to throw ────
-  // The flying food is an always-mounted motion.div whose drag is driven by
-  // dragControls: the pile piece's own pointerdown (in the drawer) hands us
-  // its live pointer event and we start the drag on THIS element with it —
-  // grabbing straight from the pile. clickableOverride keeps the whole
-  // window accepting mouse input during the gesture, since a fast flick
-  // outruns the 80ms cursor-poll hit-test.
-  const foodDragControls = useDragControls();
+  // The flying food is an always-mounted motion.div positioned purely via
+  // plain `window` mousemove/mouseup tracking (NOT framer's drag/dragControls
+  // — a cross-element "start a drag on a different, always-mounted element
+  // from a pile item's pointerdown" handoff proved unreliable here). This is
+  // the same battle-tested pattern already used by the wash sponge cursor
+  // and the pet's own drag: clickableOverride keeps the whole window
+  // accepting mouse input during the gesture, since a fast flick outruns the
+  // 80ms cursor-poll hit-test.
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
   const foodScale = useMotionValue(1);
@@ -304,18 +312,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       setMenuOpen(false);
       setClickableOverride(true);
       window.overlay.setClickable(true);
-      foodX.set(e.clientX - 20);
-      foodY.set(e.clientY - 20);
+      const x = e.clientX - 20;
+      const y = e.clientY - 20;
+      foodX.set(x);
+      foodY.set(y);
       foodScale.set(1);
       foodRotate.set(-8);
       foodOpacity.set(1);
+      foodVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setFeedPhase("held");
-      foodDragControls.start(e);
     },
-    [canFeed, consumables, foodDragControls, foodX, foodY, foodScale, foodRotate, foodOpacity],
+    [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
 
   const throwFood = useCallback(async () => {
+    setClickableOverride(false);
     setFeedPhase("released");
     const GLIDE = 0.16;
     const { vx, vy } = foodVelRef.current;
@@ -344,36 +355,40 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
     setFxTrigger(null);
     setFeedPhase("idle");
-  }, [foodX, foodY, foodScale, foodOpacity, movement, game]);
+  }, [foodX, foodY, foodScale, foodOpacity, movement, game, sfx]);
 
-  const foodDragStart = useCallback(() => {
-    foodVelRef.current = { vx: 0, vy: 0, lastX: foodX.get(), lastY: foodY.get(), lastT: performance.now() };
-  }, [foodX, foodY]);
-
-  const foodDrag = useCallback(() => {
-    const now = performance.now();
-    const v = foodVelRef.current;
-    const dt = now - v.lastT;
-    if (dt > 0 && dt < 100) {
-      v.vx = ((foodX.get() - v.lastX) / dt) * 1000;
-      v.vy = ((foodY.get() - v.lastY) / dt) * 1000;
-    }
-    v.lastX = foodX.get();
-    v.lastY = foodY.get();
-    v.lastT = now;
-  }, [foodX, foodY]);
-
-  const foodDragEnd = useCallback(() => {
-    setClickableOverride(false);
-    void throwFood();
-  }, [throwFood]);
+  useEffect(() => {
+    if (feedPhase !== "held") return;
+    const onMove = (e: MouseEvent) => {
+      const now = performance.now();
+      const v = foodVelRef.current;
+      const x = e.clientX - 20;
+      const y = e.clientY - 20;
+      const dt = now - v.lastT;
+      if (dt > 0 && dt < 100) {
+        v.vx = ((x - v.lastX) / dt) * 1000;
+        v.vy = ((y - v.lastY) / dt) * 1000;
+      }
+      v.lastX = x;
+      v.lastY = y;
+      v.lastT = now;
+      foodX.set(x);
+      foodY.set(y);
+    };
+    const onUp = () => void throwFood();
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [feedPhase, foodX, foodY, throwFood]);
 
   // ── Ball: grab from the SideDock, throw, pet fetches & throws back ──────
   // Same grab-drag-release physics as food; after landing, the pet runs
   // over, grab-bounces it, then "throws it at the screen" (zoom-fade,
   // QA-hub style). The drawer's ball slot stays empty until the sequence
   // finishes and returnBall() puts it back.
-  const ballDragControls = useDragControls();
   const ballX = useMotionValue(0);
   const ballY = useMotionValue(0);
   const ballScale = useMotionValue(0);
@@ -389,18 +404,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       setMenuOpen(false);
       setClickableOverride(true);
       window.overlay.setClickable(true);
-      ballX.set(e.clientX - 17);
-      ballY.set(e.clientY - 17);
+      const x = e.clientX - 17;
+      const y = e.clientY - 17;
+      ballX.set(x);
+      ballY.set(y);
       ballScale.set(1);
       ballRotate.set(0);
       ballOpacity.set(1);
+      ballVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setBallPhase("held");
-      ballDragControls.start(e);
     },
-    [canPlayBall, consumables, ballDragControls, ballX, ballY, ballScale, ballRotate, ballOpacity],
+    [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity],
   );
 
   const runBallFetch = useCallback(async () => {
+    setClickableOverride(false);
     setBallPhase("playing");
     const GLIDE = 0.16;
     const { vx, vy } = ballVelRef.current;
@@ -447,27 +465,32 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setBallPhase("idle");
   }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity]);
 
-  const ballDragStart = useCallback(() => {
-    ballVelRef.current = { vx: 0, vy: 0, lastX: ballX.get(), lastY: ballY.get(), lastT: performance.now() };
-  }, [ballX, ballY]);
-
-  const ballDrag = useCallback(() => {
-    const now = performance.now();
-    const v = ballVelRef.current;
-    const dt = now - v.lastT;
-    if (dt > 0 && dt < 100) {
-      v.vx = ((ballX.get() - v.lastX) / dt) * 1000;
-      v.vy = ((ballY.get() - v.lastY) / dt) * 1000;
-    }
-    v.lastX = ballX.get();
-    v.lastY = ballY.get();
-    v.lastT = now;
-  }, [ballX, ballY]);
-
-  const ballDragEnd = useCallback(() => {
-    setClickableOverride(false);
-    void runBallFetch();
-  }, [runBallFetch]);
+  useEffect(() => {
+    if (ballPhase !== "held") return;
+    const onMove = (e: MouseEvent) => {
+      const now = performance.now();
+      const v = ballVelRef.current;
+      const x = e.clientX - 17;
+      const y = e.clientY - 17;
+      const dt = now - v.lastT;
+      if (dt > 0 && dt < 100) {
+        v.vx = ((x - v.lastX) / dt) * 1000;
+        v.vy = ((y - v.lastY) / dt) * 1000;
+      }
+      v.lastX = x;
+      v.lastY = y;
+      v.lastT = now;
+      ballX.set(x);
+      ballY.set(y);
+    };
+    const onUp = () => void runBallFetch();
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [ballPhase, ballX, ballY, runBallFetch]);
 
   // ── Wash: hold sponge + scrub (entered from the SideDock's sponge) ──────
   const scrubHeldRef = useRef(false);
@@ -523,7 +546,28 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     const onMove = (e: MouseEvent) => {
       scrubCursorRef.current = { x: e.clientX, y: e.clientY };
       setScrubCursor(scrubCursorRef.current);
-      if (!scrubHeldRef.current || (e.buttons & 1) !== 1) return;
+
+      // Only progress (and only count as "actively scrubbing" for the
+      // particle effects) while the sponge is actually over the pet — a
+      // forgiving padded box around its current (frozen, non-wandering)
+      // position, not a pixel-exact hitbox.
+      const PAD = 20;
+      const petX = movement.x.get();
+      const petY = movement.y.get();
+      const overPet =
+        e.clientX >= petX - PAD &&
+        e.clientX <= petX + PET_SIZE + PAD &&
+        e.clientY >= petY - PAD &&
+        e.clientY <= petY + PET_SIZE + PAD;
+
+      if (!scrubHeldRef.current || (e.buttons & 1) !== 1 || !overPet) {
+        if (!overPet) {
+          setScrubbingEffectively(false);
+          lastScrubPointRef.current = null;
+          lastScrubAtRef.current = null;
+        }
+        return;
+      }
 
       const nextPoint = { x: e.clientX, y: e.clientY };
       const prevPoint = lastScrubPointRef.current;
@@ -580,7 +624,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("contextmenu", onContext);
     };
-  }, [cleaningMode, endCleaning]);
+  }, [cleaningMode, endCleaning, movement]);
 
   // Bubble particle spawn loop while actively scrubbing. Reads scrubCursorRef
   // (not the scrubCursor state) so this effect doesn't depend on it — mouse
@@ -670,13 +714,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         {
           key: "pet",
           icon: "🤗",
-          label: petCooldownMs > 0 ? `Pet (${Math.ceil(petCooldownMs / 60000)}m)` : "Pet",
+          label: petCooldownMs > 0 ? `Pet — recharges in ${fmtCooldown(petCooldownMs)}` : "Pet",
           onClick: () => {
             sfx(Sounds.playSqueak);
             withDeltas(game.pet);
             pulseHappy();
           },
           disabled: petCooldownMs > 0,
+          cooldownProgress: 1 - petCooldownMs / PET_COOLDOWN_MS,
+          cooldownLabel: petCooldownMs > 0 ? fmtCooldown(petCooldownMs) : undefined,
         },
         { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
       ];
@@ -696,6 +742,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     evolvePulse ? "pet-anim-evolve" : "",
     isEvolving ? "pet-anim-charging" : "",
     idleBreathing ? "pet-anim-idle-breathe" : "",
+    game.isEgg && game.isEggOverheating ? "pet-anim-overheat" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -761,18 +808,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onQuit={() => window.overlay.quit()}
       />
 
-      {/* Food — always mounted so dragControls.start() from the pile's
-          pointerdown lands on a live element. dragListener is off: the ONLY
-          way to move it is grabbing it from the pile. */}
+      {/* Food — always mounted, positioned purely via foodX/foodY motion
+          values driven by the window mousemove listener above (see grabFood
+          / the feedPhase==="held" effect). No pointer events of its own. */}
       <motion.div
-        drag
-        dragControls={foodDragControls}
-        dragListener={false}
-        dragMomentum={false}
-        dragElastic={0}
-        onDragStart={foodDragStart}
-        onDrag={foodDrag}
-        onDragEnd={foodDragEnd}
         style={{
           position: "fixed",
           left: 0,
@@ -791,16 +830,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       </motion.div>
       {feedPhase === "held" && <div style={bannerStyle}>🍖 Throw the food to your pet!</div>}
 
-      {/* Ball — same always-mounted pattern. */}
+      {/* Ball — same always-mounted, motion-value-only pattern. */}
       <motion.div
-        drag
-        dragControls={ballDragControls}
-        dragListener={false}
-        dragMomentum={false}
-        dragElastic={0}
-        onDragStart={ballDragStart}
-        onDrag={ballDrag}
-        onDragEnd={ballDragEnd}
         style={{
           position: "fixed",
           left: 0,

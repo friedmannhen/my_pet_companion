@@ -34,6 +34,7 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
 
   const [mode, setMode] = useState<"in" | "up">("in");
   const [email, setEmail] = useState(auth.lastEmail);
+  const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -50,7 +51,7 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
     if (!canSubmit) return;
     setBusy(true);
     if (mode === "in") await auth.signIn(email.trim(), password);
-    else await auth.signUp(email.trim(), password);
+    else await auth.signUp(email.trim(), password, displayName);
     setBusy(false);
   };
 
@@ -129,6 +130,23 @@ export function AuthPanel({ auth }: { auth: AuthState }) {
           }}
           onKeyDown={(e) => e.key === "Enter" && submit()}
         />
+      )}
+      {mode === "up" && (
+        <>
+          <input
+            style={input}
+            type="text"
+            maxLength={40}
+            placeholder="display name (optional)"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+          <span style={{ fontSize: 10, opacity: 0.55, marginTop: -4 }}>
+            Shown on leaderboards — leave blank to use your email instead. You
+            can set or change it later in Settings.
+          </span>
+        </>
       )}
       {passwordsMismatch && (
         <span style={{ fontSize: 11, color: "#fca5a5" }}>Passwords don&apos;t match.</span>

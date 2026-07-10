@@ -38,6 +38,30 @@ export const MON_FRI_CALENDAR: WorkCalendar = {
   workdays: [1, 2, 3, 4, 5],
 };
 
+/**
+ * Builds a calendar anchored to the PLAYER'S OWN local timezone, for
+ * standalone consumer deployments (my_pet_companion) rather than the
+ * original ERP_QA_HUB's Israeli-workplace context. Quest days reset at
+ * local midnight; the daily cutoff (when e.g. Clean Run resolves) sits late
+ * in the evening so the whole day counts, not a mid-afternoon workplace
+ * cutoff; the week resets Monday morning local time.
+ *
+ * A hardcoded single-timezone default (like ISRAEL_CALENDAR) makes quest
+ * day/week boundaries land at times that don't match a player's own clock —
+ * a real rollover in the calendar's timezone can look like "this quest
+ * became claimable again after only a few hours" to someone elsewhere.
+ */
+export function localCalendar(timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone): WorkCalendar {
+  return {
+    timeZone,
+    weekStartDay: 1,
+    weekResetHour: 0,
+    dailyCutoffHour: 23,
+    dailyCutoffMinute: 0,
+    workdays: [0, 1, 2, 3, 4, 5, 6],
+  };
+}
+
 export const DEFAULT_CALENDAR = ISRAEL_CALENDAR;
 
 export interface LocalDateTimeParts {

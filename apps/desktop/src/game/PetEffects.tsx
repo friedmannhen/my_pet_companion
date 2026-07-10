@@ -205,9 +205,12 @@ export function PetEffects({
         <div
           style={{
             position: "absolute",
-            top: -28,
+            // Spans from clearly above the pet's head down to about its feet
+            // (top -30 .. -30+170=140, vs. the pet's own 0..128 box) — drops
+            // fall the pet's full height instead of stopping mid-body.
+            top: -30,
             left: "56%",
-            height: 128,
+            height: 170,
             width: 112,
             transform: "translateX(-50%)",
             overflow: "hidden",
@@ -235,8 +238,8 @@ export function PetEffects({
                 background: "rgba(186,230,253,0.9)",
                 boxShadow: "0 0 8px rgba(125,211,252,0.8)",
               }}
-              initial={{ y: -12, opacity: 0, scaleY: 0.65 }}
-              animate={{ y: [-12, 92], opacity: [0, 1, 0.9, 0], scaleY: [0.65, 1.25, 0.85] }}
+              initial={{ y: -14, opacity: 0, scaleY: 0.65 }}
+              animate={{ y: [-14, 150], opacity: [0, 1, 0.9, 0], scaleY: [0.65, 1.25, 0.85] }}
               transition={{ duration: drop.duration, repeat: Infinity, delay: drop.delay, ease: "linear" }}
             />
           ))}
@@ -250,7 +253,7 @@ export function PetEffects({
               key={`rain-splash-${i}`}
               style={{
                 position: "absolute",
-                bottom: 20,
+                bottom: 18,
                 left: splash.x,
                 display: "block",
                 height: 4,

@@ -32,7 +32,10 @@ export interface AuthState {
   /** Whether the session should survive an app restart. Persisted immediately. */
   rememberMe: boolean;
   setRememberMe: (value: boolean) => void;
-  signUp: (email: string, password: string) => Promise<void>;
+  /** profiles.name — shown on the leaderboard/hall of fame instead of an email prefix once set. */
+  displayName: string | null;
+  updateDisplayName: (name: string) => Promise<void>;
+  signUp: (email: string, password: string, displayName?: string) => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   clearError: () => void;
@@ -83,12 +86,54 @@ export function useAuth(): AuthState {
     setRememberMeState(value);
   }, []);
 
+  const [displayName, setDisplayNameState] = useState<string | null>(null);
+
+  useEffect(() => {
+    const userId = session?.user.id;
+    if (!supabase || !userId) {
+      setDisplayNameState(null);
+      return;
+    }
+    let cancelled = false;
+    void supabase
+      .from("profiles")
+      .select("name")
+      .eq("id", userId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!cancelled) setDisplayNameState((data?.name as string | undefined) || null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user.id]);
+
+  const updateDisplayName = useCallback(
+    async (name: string) => {
+      const userId = session?.user.id;
+      const trimmed = name.trim();
+      if (!supabase || !userId || !trimmed) return;
+      const { error: updateError } = await supabase.from("profiles").update({ name: trimmed }).eq("id", userId);
+      if (updateError) throw updateError;
+      setDisplayNameState(trimmed);
+    },
+    [session?.user.id],
+  );
+
   const signUp = useCallback(
-    async (email: string, password: string) => {
+    async (email: string, password: string, displayName?: string) => {
       if (!supabase) return;
       setError(null);
       setNotice(null);
-      const { data, error } = await supabase.auth.signUp({ email, password });
+      const trimmedName = displayName?.trim();
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        // Picked up by the handle_new_user() DB trigger (coalesces
+        // full_name/name into profiles.name) — only takes effect at
+        // account creation, hence this is opt-in at sign-up time only.
+        options: trimmedName ? { data: { full_name: trimmedName } } : undefined,
+      });
       if (error) {
         setError(error.message);
         return;
@@ -140,6 +185,8 @@ export function useAuth(): AuthState {
     lastEmail,
     rememberMe,
     setRememberMe,
+    displayName,
+    updateDisplayName,
     signUp,
     signIn,
     signOut,

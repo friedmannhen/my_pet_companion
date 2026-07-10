@@ -13,6 +13,7 @@ import {
   countClaimableQuests,
   evaluatePassiveQuests,
   freshPetSave,
+  localCalendar,
   markOverfeedQuestFailure,
   normalizePetQuestState,
   normalizePetSave,
@@ -33,15 +34,20 @@ import { useAchievements, type UseAchievements } from "./useAchievements";
 const rules = DEFAULT_PET_RULES;
 const SAVE_KEY = "mpc_pet_save_cat";
 const TICK_MS = 60_000;
+// Quest day/week boundaries anchor to the PLAYER'S OWN local timezone (not
+// the hardcoded Israel-business-hours default in pet-core, which is a
+// carry-over from the original ERP widget's deployment) — computed once,
+// since the runtime's timezone doesn't change mid-session.
+const calendar = localCalendar();
 
 function loadSave(): PetSaveData {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    if (raw) return normalizePetSave(JSON.parse(raw) as PetSaveData);
+    if (raw) return normalizePetSave(JSON.parse(raw) as PetSaveData, undefined, undefined, calendar);
   } catch {
     /* corrupted save — start fresh */
   }
-  return freshPetSave({ petType: "cat" });
+  return freshPetSave({ petType: "cat" }, undefined, calendar);
 }
 
 function applyDecay(save: PetSaveData): PetSaveData {
@@ -80,6 +86,8 @@ export interface PetGame {
   isEgg: boolean;
   canHatch: boolean;
   canEvolve: boolean;
+  /** True from the instant warmth hits 100 (immediate red-warning visual) — see warmTick. */
+  isEggOverheating: boolean;
   /** 0..1 progress toward the next lifecycle step (1 when ready/final). */
   evolutionProgress: number;
   /** Care points needed for the next lifecycle step (null at final stage). */
@@ -112,7 +120,9 @@ export type SyncStatus = "offline" | "loading" | "synced" | "error";
 export function usePetGame(userId: string | null): PetGame {
   // Offline catch-up + quest-period rollover happen once at load, before
   // first render uses the save.
-  const [save, setSave] = useState<PetSaveData>(() => normalizeQuestPeriods(applyDecay(loadSave())));
+  const [save, setSave] = useState<PetSaveData>(() =>
+    normalizeQuestPeriods(applyDecay(loadSave()), new Date(), calendar),
+  );
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
   const [syncError, setSyncError] = useState<string | null>(null);
   const saveRef = useRef(save);
@@ -172,14 +182,18 @@ export function usePetGame(userId: string | null): PetGame {
           const questRow = qp as QuestProgressRow;
           loaded = {
             ...loaded,
-            quests: normalizePetQuestState({
-              daily: questRow.daily as PetQuestState["daily"],
-              weekly: questRow.weekly as PetQuestState["weekly"],
-              completionCounts: questRow.completion_counts as PetQuestState["completionCounts"],
-            }),
+            quests: normalizePetQuestState(
+              {
+                daily: questRow.daily as PetQuestState["daily"],
+                weekly: questRow.weekly as PetQuestState["weekly"],
+                completionCounts: questRow.completion_counts as PetQuestState["completionCounts"],
+              },
+              new Date(),
+              calendar,
+            ),
           };
         }
-        setSave(normalizeQuestPeriods(loaded));
+        setSave(normalizeQuestPeriods(loaded, new Date(), calendar));
       } else {
         const seeded = saveRef.current;
         const { data: inserted, error: insErr } = await supabase
@@ -249,7 +263,7 @@ export function usePetGame(userId: string | null): PetGame {
   // awake minute that just elapsed.
   useEffect(() => {
     const id = setInterval(
-      () => setSave((prev) => evaluatePassiveQuests(applyDecay(prev), rules, new Date(), undefined, 1)),
+      () => setSave((prev) => evaluatePassiveQuests(applyDecay(prev), rules, new Date(), calendar, 1)),
       TICK_MS,
     );
     return () => clearInterval(id);
@@ -303,7 +317,63 @@ export function usePetGame(userId: string | null): PetGame {
   // achievements multiply the category's base points.
   // Warming is a hold-interaction (like the hub's hold-fire egg mini-game):
   // each pulse is a small slice; ~2s of holding ≈ one classic +20 warm action.
-  const warmTick = useCallback(() => careAction("warmth", 2, 0.5, "feed"), [careAction]);
+  //
+  // Overheat (ported from ERP_QA_HUB's warmEgg): once warmth hits 100,
+  // continuing to hold immediately flags isEggOverheating (for the red
+  // warning visual) but doesn't penalize yet — only past a short grace
+  // window (rules.eggOverheat.graceMs) does it start draining happiness and
+  // care points instead of gaining anything.
+  const eggOverheatSinceRef = useRef<number | null>(null);
+  const [isEggOverheating, setIsEggOverheating] = useState(false);
+
+  const warmTick = useCallback(() => {
+    const AMOUNT = 2;
+    setSave((prev) => {
+      if (!prev.isAlive || prev.isSleeping || prev.evolutionStage !== 0) return prev;
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const overheated = prev.warmth >= 100;
+
+      if (overheated) {
+        if (eggOverheatSinceRef.current === null) eggOverheatSinceRef.current = Date.now();
+        setIsEggOverheating(true);
+      } else {
+        eggOverheatSinceRef.current = null;
+        setIsEggOverheating(false);
+      }
+
+      if (overheated) {
+        const pastGrace =
+          eggOverheatSinceRef.current !== null &&
+          Date.now() - eggOverheatSinceRef.current > rules.eggOverheat.graceMs;
+        if (!pastGrace) {
+          // Still within the grace window — no gain, no penalty yet.
+          return { ...prev, lastInteraction: nowIso };
+        }
+        const nextPoints = clampCarePointsForProgress(prev, prev.carePoints - 0.5, rules);
+        const next: PetSaveData = {
+          ...prev,
+          happiness: clampStat(prev.happiness - 1),
+          carePoints: nextPoints,
+          lastInteraction: nowIso,
+        };
+        return recordCareActionQuestProgress(next, "feed", rules, now, calendar, false);
+      }
+
+      const before = prev.warmth;
+      const applied = Math.min(AMOUNT, 100 - before);
+      const earned = proportionalPoints(0.5 * multRef.current.feed, before, AMOUNT);
+      const nextPoints = clampCarePointsForProgress(prev, prev.carePoints + earned, rules);
+      const next: PetSaveData = {
+        ...prev,
+        warmth: clampStat(before + applied),
+        happiness: clampStat(prev.happiness + applied * 0.25),
+        carePoints: nextPoints,
+        lastInteraction: nowIso,
+      };
+      return recordCareActionQuestProgress(next, "feed", rules, now, calendar, before < 100);
+    });
+  }, []);
   const beginWarmSession = useCallback(() => {
     setSave((prev) => {
       if (!prev.isAlive) return prev;
@@ -311,7 +381,7 @@ export function usePetGame(userId: string | null): PetGame {
       // One warm session counts like one feed for quests (qualified while
       // warmth still has room).
       const next = { ...prev, feedCount: prev.feedCount + 1 };
-      return recordCareActionQuestProgress(next, "feed", rules, now, undefined, prev.warmth < 100);
+      return recordCareActionQuestProgress(next, "feed", rules, now, calendar, prev.warmth < 100);
     });
   }, []);
 
@@ -339,8 +409,8 @@ export function usePetGame(userId: string | null): PetGame {
           feedCount: prev.feedCount + 1,
           overfeedCount: (prev.overfeedCount ?? 0) + 1,
         };
-        next = recordCareActionQuestProgress(next, "feed", rules, now, undefined, false);
-        return markOverfeedQuestFailure(next, now);
+        next = recordCareActionQuestProgress(next, "feed", rules, now, calendar, false);
+        return markOverfeedQuestFailure(next, now, calendar);
       }
       const before = prev.hunger;
       const earned = proportionalPoints(5 * multRef.current.feed, before, 40);
@@ -356,39 +426,41 @@ export function usePetGame(userId: string | null): PetGame {
         lastFed: nowIso,
         feedCount: prev.feedCount + 1,
       };
-      return recordCareActionQuestProgress(next, "feed", rules, now, undefined, before < 100);
+      return recordCareActionQuestProgress(next, "feed", rules, now, calendar, before < 100);
     });
   }, []);
 
   const wash = useCallback(
     () =>
       careAction("cleanliness", 60, 5, "wash", "washCount", (next, now, before) =>
-        recordCareActionQuestProgress(next, "wash", rules, now, undefined, before < 100),
+        recordCareActionQuestProgress(next, "wash", rules, now, calendar, before < 100),
       ),
     [careAction],
   );
   const pet = useCallback(
     () =>
       careAction("happiness", 20, 5, "play", "petCount", (next, now, before) =>
-        recordCareActionQuestProgress(next, "pet", rules, now, undefined, before < 100),
+        recordCareActionQuestProgress(next, "pet", rules, now, calendar, before < 100),
       ),
     [careAction],
   );
   const throwBall = useCallback(
     () =>
       careAction("happiness", 15, 4, "play", "throwBallCount", (next, now) =>
-        recordThrowBallQuestProgress(next, now),
+        recordThrowBallQuestProgress(next, now, calendar),
       ),
     [careAction],
   );
 
   const claimQuest = useCallback((code: PetQuestCode) => {
-    setSave((prev) => claimQuestReward(prev, code, rules));
+    setSave((prev) => claimQuestReward(prev, code, rules, new Date(), calendar));
   }, []);
 
   const canEvolveNow = canEvolveStage(save.carePoints, save.evolutionStage, rules);
 
   const hatchOrEvolve = useCallback(() => {
+    eggOverheatSinceRef.current = null;
+    setIsEggOverheating(false);
     setSave((prev) => {
       if (!prev.isAlive || prev.evolutionStage >= 3) return prev;
       if (!canEvolveStage(prev.carePoints, prev.evolutionStage, rules)) return prev;
@@ -456,7 +528,9 @@ export function usePetGame(userId: string | null): PetGame {
 
   const restart = useCallback(() => {
     hofClaimedRef.current = false;
-    setSave(freshPetSave({ petType: "cat" }));
+    eggOverheatSinceRef.current = null;
+    setIsEggOverheating(false);
+    setSave(freshPetSave({ petType: "cat" }, undefined, calendar));
   }, []);
 
   const rename = useCallback((name: string) => {
@@ -501,6 +575,7 @@ export function usePetGame(userId: string | null): PetGame {
     isEgg,
     canHatch: isEgg && canEvolveNow,
     canEvolve: !isEgg && canEvolveNow,
+    isEggOverheating,
     evolutionProgress,
     nextThreshold,
     warmTick,

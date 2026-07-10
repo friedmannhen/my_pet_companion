@@ -265,9 +265,9 @@ export const PET_ACHIEVEMENT_DEFINITIONS: Record<PetAchievementCode, PetAchievem
   allPetsHatched: {
     code: "allPetsHatched",
     title: "Full Nest",
-    description: "Hatch every pet type at least once.",
+    description: "Hatch your first 3 pets.",
     icon: "🏡",
-    target: 7,
+    target: 3,
     progress: (saves) => Object.values(saves).filter((s) => s.hatched).length,
     reward: { category: "feed", percent: 6 },
     displayOrder: 14,

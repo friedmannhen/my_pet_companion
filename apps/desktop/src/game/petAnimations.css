@@ -92,3 +92,18 @@
     transform: scale(1.015, 0.985);
   }
 }
+
+/* Egg overheat warning — pulsing red glow, from the instant warmth hits 100
+   (see usePetGame.ts's warmTick / isEggOverheating). */
+.pet-anim-overheat {
+  animation: pet-overheat 0.5s ease-in-out infinite;
+}
+@keyframes pet-overheat {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.9)) saturate(1.3);
+  }
+  50% {
+    filter: drop-shadow(0 0 16px rgba(239, 68, 68, 1)) saturate(1.8) brightness(1.15);
+  }
+}

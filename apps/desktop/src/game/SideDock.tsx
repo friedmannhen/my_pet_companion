@@ -308,6 +308,15 @@ export function SideDock({
   const { save } = game;
   const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "settings">("home");
   const [nameDraft, setNameDraft] = useState(save.name);
+  const [renameSaved, setRenameSaved] = useState(false);
+  const [displayNameDraft, setDisplayNameDraft] = useState(auth.displayName ?? "");
+  const [displayNameSaved, setDisplayNameSaved] = useState(false);
+
+  const saveDisplayName = () => {
+    const trimmed = displayNameDraft.trim();
+    if (!trimmed) return;
+    void auth.updateDisplayName(trimmed).then(() => setDisplayNameSaved(true));
+  };
 
   // The rename input needs real OS keyboard focus (the overlay window is
   // non-focusable by default — see main.ts). Granted only while the
@@ -320,7 +329,12 @@ export function SideDock({
     return () => window.overlay.setFocusable(false);
   }, [settingsActive]);
   useEffect(() => {
-    if (settingsActive) setNameDraft(save.name);
+    if (settingsActive) {
+      setNameDraft(save.name);
+      setDisplayNameDraft(auth.displayName ?? "");
+      setRenameSaved(false);
+      setDisplayNameSaved(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsActive]);
   const leaderboard = useLeaderboard(auth.userId, open && view === "ranks");
@@ -593,9 +607,15 @@ export function SideDock({
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <input
                   value={nameDraft}
-                  onChange={(e) => setNameDraft(e.target.value)}
+                  onChange={(e) => {
+                    setNameDraft(e.target.value);
+                    setRenameSaved(false);
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") onRename(nameDraft);
+                    if (e.key === "Enter") {
+                      onRename(nameDraft);
+                      setRenameSaved(true);
+                    }
                   }}
                   maxLength={24}
                   placeholder="Pet name"
@@ -612,12 +632,59 @@ export function SideDock({
                 />
                 <button
                   style={{ ...chipStyle, opacity: nameDraft.trim() && nameDraft.trim() !== save.name ? 1 : 0.5 }}
-                  onClick={() => onRename(nameDraft)}
+                  onClick={() => {
+                    onRename(nameDraft);
+                    setRenameSaved(true);
+                  }}
                   disabled={!nameDraft.trim() || nameDraft.trim() === save.name}
                 >
                   Rename
                 </button>
               </div>
+              {renameSaved && nameDraft.trim() === save.name && (
+                <div style={{ fontSize: 11, color: "#34d399", marginTop: 4 }}>✓ Renamed to {save.name}!</div>
+              )}
+            </section>
+
+            <section style={{ marginBottom: 18 }}>
+              <h2 style={sectionTitle}>Profile</h2>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  value={displayNameDraft}
+                  onChange={(e) => {
+                    setDisplayNameDraft(e.target.value);
+                    setDisplayNameSaved(false);
+                  }}
+                  onKeyDown={(e) => e.key === "Enter" && saveDisplayName()}
+                  maxLength={40}
+                  placeholder="Display name (shown on leaderboards)"
+                  style={{
+                    flex: 1,
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 7,
+                    padding: "6px 8px",
+                    fontSize: 12,
+                    background: "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  style={{ ...chipStyle, opacity: displayNameDraft.trim() ? 1 : 0.5 }}
+                  onClick={saveDisplayName}
+                  disabled={!displayNameDraft.trim()}
+                >
+                  Save
+                </button>
+              </div>
+              {displayNameSaved && (
+                <div style={{ fontSize: 11, color: "#34d399", marginTop: 4 }}>✓ Saved!</div>
+              )}
+              {!auth.displayName && !displayNameSaved && (
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                  Currently showing your email prefix instead.
+                </div>
+              )}
             </section>
 
             <section style={{ marginBottom: 18 }}>
@@ -876,7 +943,14 @@ export function SideDock({
                     {FOOD_PILE_LAYOUT.map((p, i) => (
                       <span
                         key={i}
-                        onPointerDown={canFeed && foodReady[i] ? (e) => onGrabFood(e, i) : undefined}
+                        onPointerDown={
+                          canFeed && foodReady[i]
+                            ? (e) => {
+                                e.preventDefault();
+                                onGrabFood(e, i);
+                              }
+                            : undefined
+                        }
                         title={
                           !canFeed
                             ? "Not available right now"
@@ -910,7 +984,14 @@ export function SideDock({
                 <div style={{ ...itemBoxStyle, opacity: canPlayBall ? 1 : 0.45 }}>
                   <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span
-                      onPointerDown={canPlayBall && ballReady ? onGrabBall : undefined}
+                      onPointerDown={
+                        canPlayBall && ballReady
+                          ? (e) => {
+                              e.preventDefault();
+                              onGrabBall(e);
+                            }
+                          : undefined
+                      }
                       title={
                         !canPlayBall
                           ? "Not available right now"

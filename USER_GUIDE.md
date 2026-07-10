@@ -18,6 +18,9 @@ it should never drift behind what's implemented.
   Your last-used email is always remembered regardless, so you never have
   to retype it.
 - Once signed in, your pet appears — a floating cat that roams your desktop.
+- Sign-up has an optional **display name** field — set once, it's what
+  shows on the leaderboard instead of your email prefix. You can also set
+  or change it later from Settings.
 
 ## The pet overlay
 
@@ -32,14 +35,20 @@ its menus are interactive.
   hold) automatically cancels warming, so the two gestures don't fight.
 - Eggs can be **washed** too — grab the sponge from the dock drawer (see
   "Washing" below).
+- **Overheating**: once warmth hits 100%, the egg starts glowing red as a
+  warning. Keep holding past a ~1-second grace window and you start
+  **losing happiness and care points** instead of gaining anything — let go
+  once it's full.
 - Once care points reach the hatch threshold, tapping the egg **hatches
   it** — see "Evolving" below for what that looks like.
 
 ### Hatched pet (baby / adult / final)
 - **Click the pet** to open the radial interaction menu — a ring of action
   buttons pops out around it:
-  - 🤗 **Pet** — pets the pet, hearts float up. Has a **5-minute cooldown**
-    (grayed out until it's up) so it can't be spammed for free happiness.
+  - 🤗 **Pet** — pets the pet, hearts float up. Has a **5-minute cooldown**:
+    while recharging, a ring fills in around the button and a countdown
+    badge (e.g. "3m", "45s") shows underneath it, so it's obvious when
+    you'll be able to pet again.
   - 🌙 **Tuck in** — manual sleep toggle. This is *protected sleep*: stats
     stay frozen (floored, never dropping to zero) for up to 72 hours, so
     leaving the pet asleep over a weekend is safe.
@@ -81,12 +90,13 @@ sick 🤢) — so there's a real reason not to spam it.
 Grab the 🧽 sponge from the drawer's Kitchen & toy box (click it) — your
 cursor becomes a sponge, and light rain/water-drop effects appear over the
 pet while you work. **Hold the left mouse button down and move the sponge
-back and forth over the pet** to scrub. A progress bar shows how much
-scrubbing is left (a dirtier pet needs more scrubbing, up to ~10 seconds of
-real scrubbing motion). Bubbles pop off the pet while you're actively
-scrubbing. Stop moving (even with the button held) and progress pauses —
-you have to keep the sponge moving. Cancel anytime with **Esc**,
-**right-click**, or the **✕** button on the progress panel.
+back and forth over the pet itself** to scrub — progress and the bubble
+particles only happen while the sponge is actually over the pet, moving it
+off just pauses everything without losing progress. A progress bar shows
+how much scrubbing is left (a dirtier pet needs more scrubbing, up to ~10
+seconds of real scrubbing motion). Stop moving (even with the button held)
+and progress pauses — you have to keep the sponge moving. Cancel anytime
+with **Esc**, **right-click**, or the **✕** button on the progress panel.
 
 ### Playing fetch
 **Press down on the ⚾ in the drawer and drag it out** — same grab as the
@@ -125,10 +135,12 @@ game's drawer.
 - The **⚙ Settings view** (gear button in the drawer header) has: dock
   side (left/right edge), a **🔊 sound toggle** (feeding noms, wash
   splashes, pet squeaks, evolution fanfares — all synthesized, no audio
-  files), **renaming your pet**, **⚠️ Take over** (only shown if your
-  account is active on another device — click to make *this* the live
-  session), **Sign out**, and **Quit**. A red sync-error message appears
-  here too if something's wrong with cloud sync.
+  files), **renaming your pet** (confirms with a green "✓ Renamed!" once
+  saved), your **display name** for the leaderboard (same confirmation),
+  **⚠️ Take over** (only shown if your account is active on another device
+  — click to make *this* the live session), **Sign out**, and **Quit**. A
+  red sync-error message appears here too if something's wrong with cloud
+  sync.
 - A colored dot on the tab shows cloud-sync status at a glance (green =
   synced, yellow = syncing, gray = offline, red = error). A red number
   badge on the tab means you have unclaimed quest/achievement rewards.
@@ -186,4 +198,3 @@ Visible only in development builds (never in a packaged release), a small
 - No friend requests or private groups yet — the leaderboard/hall of fame
   run on the automatic Global group everyone joins at signup. Friend
   circles, org groups, and richer multiplayer come later.
-- Sounds are not ported yet (the settings view reserves a spot).

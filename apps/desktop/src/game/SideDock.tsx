@@ -943,14 +943,13 @@ export function SideDock({
                     {FOOD_PILE_LAYOUT.map((p, i) => (
                       <span
                         key={i}
-                        onPointerDown={
-                          canFeed && foodReady[i]
-                            ? (e) => {
-                                e.preventDefault();
-                                onGrabFood(e, i);
-                              }
-                            : undefined
-                        }
+                        draggable={false}
+                        // NOTE: do NOT preventDefault here — GameView tracks
+                        // the throw with window mouse events, and calling
+                        // preventDefault on this pointerdown suppresses the
+                        // browser's compatibility mouse events for the whole
+                        // gesture, so mousemove/mouseup would never fire.
+                        onPointerDown={canFeed && foodReady[i] ? (e) => onGrabFood(e, i) : undefined}
                         title={
                           !canFeed
                             ? "Not available right now"
@@ -984,14 +983,10 @@ export function SideDock({
                 <div style={{ ...itemBoxStyle, opacity: canPlayBall ? 1 : 0.45 }}>
                   <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span
-                      onPointerDown={
-                        canPlayBall && ballReady
-                          ? (e) => {
-                              e.preventDefault();
-                              onGrabBall(e);
-                            }
-                          : undefined
-                      }
+                      draggable={false}
+                      // See the food pile note above — no preventDefault, or
+                      // the window mouse-tracking of the throw never fires.
+                      onPointerDown={canPlayBall && ballReady ? (e) => onGrabBall(e) : undefined}
                       title={
                         !canPlayBall
                           ? "Not available right now"

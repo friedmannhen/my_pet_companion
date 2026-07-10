@@ -299,13 +299,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // be silently missed. Wash doesn't hit this because it starts on onClick
   // (fires only after release already happened), not onPointerDown.
   //
-  // Tracking uses POINTER events (pointermove/pointerup), not legacy mouse
-  // events. SideDock's pile item calls preventDefault() on its pointerdown
-  // (to stop native drag-ghost/selection) — per spec, that suppresses the
-  // browser's *compatibility mouse events* (mousedown/mousemove/mouseup)
-  // for the rest of that gesture, even for a real mouse, not just touch.
-  // mousemove/mouseup listeners here would simply never fire. Pointer
-  // events aren't compatibility shims, so they're unaffected.
+  // Tracking uses plain window MOUSE events (mousemove/mouseup) — the exact
+  // primitive the wash/scrub mini-game uses and that clickableOverride is
+  // built to guarantee ("native mousemove/mousedown/mouseup fire reliably
+  // during these mini-games"). CRUCIAL: the pile item that starts this must
+  // NOT call preventDefault() on its pointerdown — doing so suppresses the
+  // browser's compatibility mouse events for the whole gesture (even for a
+  // real mouse), so mousemove/mouseup would silently never fire. That
+  // suppression was the actual bug behind "grab a piece, it just fades and
+  // nothing throws"; the pile handler passes the event straight through now.
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
   const foodScale = useMotionValue(1);
@@ -338,7 +340,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       foodVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setFeedPhase("held");
 
-      const onMove = (ev: PointerEvent) => {
+      const onMove = (ev: MouseEvent) => {
         const now = performance.now();
         const v = foodVelRef.current;
         const nx = ev.clientX - 20;
@@ -355,12 +357,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         foodY.set(ny);
       };
       const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
         throwFoodRef.current();
       };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     },
     [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
@@ -430,7 +432,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       ballVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setBallPhase("held");
 
-      const onMove = (ev: PointerEvent) => {
+      const onMove = (ev: MouseEvent) => {
         const now = performance.now();
         const v = ballVelRef.current;
         const nx = ev.clientX - 17;
@@ -447,12 +449,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         ballY.set(ny);
       };
       const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
         runBallFetchRef.current();
       };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     },
     [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity],
   );

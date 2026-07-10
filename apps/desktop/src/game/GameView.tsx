@@ -284,30 +284,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setTimeout(() => setFxTrigger((t) => (t === "happy" ? null : t)), 900);
   }, []);
 
-  // ── Feed: grab a piece off the SideDock pile, drag, release to throw ────
-  // The flying food is an always-mounted motion.div positioned purely via
-  // plain `window` mousemove/mouseup tracking (NOT framer's drag/dragControls
-  // — a cross-element "start a drag on a different, always-mounted element
-  // from a pile item's pointerdown" handoff proved unreliable here).
+  // ── Feed: click a piece to grab it, it follows the cursor, click again
+  // to throw ───────────────────────────────────────────────────────────────
+  // Deliberately NOT a continuous press-hold-drag-release: that requires
+  // perfect mouse-event delivery for the entire gesture duration in an
+  // Electron click-through overlay, which repeatedly proved unreliable here
+  // (several attempts, still flaky). Two independent, fully-completed click
+  // events — grab, then throw — is the same pattern already proven solid
+  // earlier this session (click Feed, then click anywhere to throw) and is
+  // far more forgiving: nothing has to stay held or move fast enough to
+  // "win" a timing race.
   //
-  // The tracking listeners are attached SYNCHRONOUSLY inside the same
-  // onPointerDown handler that starts the grab — not via a useEffect
-  // reacting to feedPhase turning "held". A useEffect only runs after React
-  // commits the state change (a render + a scheduled effect pass), and for
-  // a quick click (press, then release almost immediately — no real hold)
-  // the native release can fire before that effect ever attaches, so it'd
-  // be silently missed. Wash doesn't hit this because it starts on onClick
-  // (fires only after release already happened), not onPointerDown.
-  //
-  // Tracking uses plain window MOUSE events (mousemove/mouseup) — the exact
-  // primitive the wash/scrub mini-game uses and that clickableOverride is
-  // built to guarantee ("native mousemove/mousedown/mouseup fire reliably
-  // during these mini-games"). CRUCIAL: the pile item that starts this must
-  // NOT call preventDefault() on its pointerdown — doing so suppresses the
-  // browser's compatibility mouse events for the whole gesture (even for a
-  // real mouse), so mousemove/mouseup would silently never fire. That
-  // suppression was the actual bug behind "grab a piece, it just fades and
-  // nothing throws"; the pile handler passes the event straight through now.
+  // The pile item's onClick calls stopPropagation() before grabFood runs —
+  // otherwise that SAME click event would keep bubbling up to the window
+  // "click" listener grabFood is about to attach, instantly self-triggering
+  // the throw at the exact spot it was just grabbed.
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
   const foodScale = useMotionValue(1);
@@ -322,8 +313,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const throwFoodRef = useRef<() => void>(() => {});
 
   const grabFood = useCallback(
-    (e: React.PointerEvent, slot: number) => {
-      if (e.button !== 0) return;
+    (e: React.MouseEvent, slot: number) => {
       if (!canFeed) return;
       if (!consumables.takeFood(slot)) return;
       setStatsOpen(false);
@@ -356,13 +346,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         foodX.set(nx);
         foodY.set(ny);
       };
-      const onUp = () => {
+      const onThrowClick = () => {
         window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("click", onThrowClick);
         throwFoodRef.current();
       };
       window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
+      window.addEventListener("click", onThrowClick);
     },
     [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
@@ -414,8 +404,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const runBallFetchRef = useRef<() => void>(() => {});
 
   const grabBall = useCallback(
-    (e: React.PointerEvent) => {
-      if (e.button !== 0) return;
+    (e: React.MouseEvent) => {
       if (!canPlayBall) return;
       if (!consumables.takeBall()) return;
       setStatsOpen(false);
@@ -448,13 +437,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         ballX.set(nx);
         ballY.set(ny);
       };
-      const onUp = () => {
+      const onThrowClick = () => {
         window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("click", onThrowClick);
         runBallFetchRef.current();
       };
       window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
+      window.addEventListener("click", onThrowClick);
     },
     [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity],
   );
@@ -844,7 +833,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       >
         🍖
       </motion.div>
-      {feedPhase === "held" && <div style={bannerStyle}>🍖 Throw the food to your pet!</div>}
+      {feedPhase === "held" && <div style={bannerStyle}>🍖 Click anywhere to throw the food!</div>}
 
       {/* Ball — same always-mounted, motion-value-only pattern. */}
       <motion.div
@@ -864,7 +853,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       >
         ⚾
       </motion.div>
-      {ballPhase === "held" && <div style={bannerStyle}>⚾ Throw the ball — your pet will fetch it!</div>}
+      {ballPhase === "held" && <div style={bannerStyle}>⚾ Click anywhere to throw the ball!</div>}
 
       {/* Wash: sponge cursor + progress + bubbles */}
       {cleaningMode && (

@@ -266,10 +266,10 @@ export interface SideDockProps {
   canFeed: boolean;
   foodReady: boolean[];
   foodEtaMs: number[];
-  onGrabFood: (e: React.PointerEvent, slot: number) => void;
+  onGrabFood: (e: React.MouseEvent, slot: number) => void;
   ballReady: boolean;
   canPlayBall: boolean;
-  onGrabBall: (e: React.PointerEvent) => void;
+  onGrabBall: (e: React.MouseEvent) => void;
   canClean: boolean;
   onStartClean: () => void;
   soundEnabled: boolean;
@@ -944,17 +944,25 @@ export function SideDock({
                       <span
                         key={i}
                         draggable={false}
-                        // NOTE: do NOT preventDefault here — GameView tracks
-                        // the throw with window mouse events, and calling
-                        // preventDefault on this pointerdown suppresses the
-                        // browser's compatibility mouse events for the whole
-                        // gesture, so mousemove/mouseup would never fire.
-                        onPointerDown={canFeed && foodReady[i] ? (e) => onGrabFood(e, i) : undefined}
+                        // A plain click, not a held drag — grabs the piece
+                        // (it then follows the cursor), click again anywhere
+                        // to throw. stopPropagation keeps this SAME click
+                        // from also bubbling to the window "click" listener
+                        // grabFood attaches, which would instantly
+                        // self-trigger the throw at the grab point.
+                        onClick={
+                          canFeed && foodReady[i]
+                            ? (e) => {
+                                e.stopPropagation();
+                                onGrabFood(e, i);
+                              }
+                            : undefined
+                        }
                         title={
                           !canFeed
                             ? "Not available right now"
                             : foodReady[i]
-                              ? "Grab and throw to your pet"
+                              ? "Click to grab, click again to throw"
                               : `Regrows in ${fmtEta(foodEtaMs[i] ?? 0)}`
                         }
                         style={{
@@ -968,6 +976,11 @@ export function SideDock({
                           cursor: canFeed && foodReady[i] ? "grab" : "default",
                           opacity: foodReady[i] ? 1 : 0.15,
                           filter: foodReady[i] ? undefined : "grayscale(1)",
+                          // The pile's pieces overlap slightly (see
+                          // FOOD_PILE_LAYOUT) — an already-taken, inert
+                          // piece must not keep intercepting clicks meant
+                          // for a ready piece behind/under it.
+                          pointerEvents: canFeed && foodReady[i] ? "auto" : "none",
                         }}
                       >
                         🍖
@@ -984,14 +997,21 @@ export function SideDock({
                   <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span
                       draggable={false}
-                      // See the food pile note above — no preventDefault, or
-                      // the window mouse-tracking of the throw never fires.
-                      onPointerDown={canPlayBall && ballReady ? (e) => onGrabBall(e) : undefined}
+                      // See the food pile note above — click to grab, click
+                      // again to throw.
+                      onClick={
+                        canPlayBall && ballReady
+                          ? (e) => {
+                              e.stopPropagation();
+                              onGrabBall(e);
+                            }
+                          : undefined
+                      }
                       title={
                         !canPlayBall
                           ? "Not available right now"
                           : ballReady
-                            ? "Grab and throw — the pet will fetch it"
+                            ? "Click to grab, click again to throw"
                             : "The pet is playing with it"
                       }
                       style={{

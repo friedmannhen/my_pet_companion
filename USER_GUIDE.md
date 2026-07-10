@@ -178,6 +178,30 @@ category of action (feeding / washing / play) — stack them up over time.
   pet ever to reach its final form). Once claimed, a record keeps its
   owner's name forever.
 
+## Groups & going online (👥 in the drawer header)
+
+**Only hatched pets can go online — eggs stay home.**
+
+- **Groups**: create a friend circle (you get a 6-character **invite code**
+  to share), or join a friend's with their code. Everyone is also in the
+  automatic **Global** group. You can leave any group except Global.
+- **Enter a room** (🌐 button on a group): your pet appears on every
+  member's desktop, and their pets appear on yours — walking around live,
+  with name tags. A **room bar** shows up at the bottom of your screen.
+- **Chat** (💬 in the room bar): messages appear as speech bubbles above
+  the pets. **Emotes**: one-click reactions (👋 ❤️ 😂 😮 😢 🎉) burst above
+  your pet on everyone's screen.
+- **Click a friend's pet** to interact:
+  - 🤗 **Pet it** — its owner sees hearts and their pet gains a little
+    happiness (no care points, so it can't be farmed).
+  - ⚔️ **Challenge it** — the owner gets an Accept/Decline banner. On
+    accept, a **3-round battle** plays out identically on both screens:
+    rounds are decided by pet stage + how well-cared-for each pet is, with
+    enough luck that no fight is ever a guaranteed win. Winner gets
+    **+10 happiness and +6 ⭐**, loser sheds a little happiness.
+- **Leave** from the room bar or the Groups view. Chat is ephemeral —
+  nothing is stored.
+
 ## Dev-only: admin panel
 
 Visible only in development builds (never in a packaged release), a small
@@ -200,6 +224,8 @@ Visible only in development builds (never in a packaged release), a small
 - Only the cat is playable (phoenix and the other four pet types have no
   sprite art yet — see PET_GAME_TRANSFORMATION_PLAN.md §14).
 - No Google/Microsoft sign-in — email/password only.
-- No friend requests or private groups yet — the leaderboard/hall of fame
-  run on the automatic Global group everyone joins at signup. Friend
-  circles, org groups, and richer multiplayer come later.
+- Room chat/emotes/battles need both players online at the same time —
+  there's no offline inbox yet. Friend requests (the DB supports them) have
+  no UI yet; groups + invite codes are the way to connect for now.
+- Room channels are only as private as the group (hardening with Realtime
+  authorization is a follow-up).

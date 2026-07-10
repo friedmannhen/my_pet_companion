@@ -1,0 +1,63 @@
+/* Body squash/stretch per pet state — ported from ERP_QA_HUB's src/index.css.
+   Plain CSS keyframes layered independently on top of the framer-motion
+   x/y position (usePetMovement) and drag-lag lean offset. */
+
+.pet-anim-walk {
+  animation: pet-walk 0.48s ease-in-out infinite;
+}
+@keyframes pet-walk {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-7px) rotate(-5deg);
+  }
+  75% {
+    transform: translateY(-7px) rotate(5deg);
+  }
+}
+
+.pet-anim-eat {
+  animation: pet-eat 0.28s ease-in-out infinite;
+}
+@keyframes pet-eat {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.08, 0.92);
+  }
+}
+
+.pet-anim-happy {
+  animation: pet-happy 0.7s ease-in-out;
+}
+@keyframes pet-happy {
+  0% {
+    transform: scale(1) rotate(0deg);
+  }
+  30% {
+    transform: scale(1.18) rotate(-6deg);
+  }
+  60% {
+    transform: scale(1.1) rotate(5deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+.pet-anim-evolve {
+  animation: pet-evolve 0.65s ease-in-out 4;
+}
+@keyframes pet-evolve {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(4);
+  }
+}

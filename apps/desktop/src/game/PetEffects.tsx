@@ -1,0 +1,249 @@
+// Particle effects layered over the pet — ported from ERP_QA_HUB's
+// src/components/pet/PetEffects.tsx. All framer-motion keyframe `animate`
+// arrays, no physics engine — everything here is time-based, not
+// force-based (the wash scrub-bubble particles live separately in
+// GameView.tsx since they're spawned from live cursor position, not a
+// fire-and-forget trigger).
+import { AnimatePresence, motion } from "framer-motion";
+
+export type PetFxTrigger = "happy" | "eat" | "overfed" | "overheated" | null;
+
+export interface PetEffectsProps {
+  trigger: PetFxTrigger;
+  readyToEvolve: boolean;
+  showEvolutionBurst: boolean;
+  isSleeping: boolean;
+  isAlive: boolean;
+  isEgg: boolean;
+  /** hunger (or warmth for an egg) — drives the "I'm hungry / keep me warm" bubble. */
+  careNeed: number;
+  cleanliness: number;
+  isCleaningMode: boolean;
+}
+
+interface FloatProps {
+  id: string;
+  emoji: string;
+  x: number;
+  delayMs: number;
+  repeat?: boolean;
+}
+
+function FloatParticle({ id, emoji, x, delayMs, repeat = false }: FloatProps) {
+  return (
+    <motion.span
+      key={id}
+      style={{
+        position: "absolute",
+        left: "50%",
+        bottom: "80%",
+        pointerEvents: "none",
+        fontSize: 18,
+        lineHeight: 1,
+        userSelect: "none",
+      }}
+      initial={{ opacity: 0, x, y: 0, scale: 0 }}
+      animate={{ opacity: [0, 1, 1, 0], y: [-4, -36, -44], scale: [0, 1, 0.8, 0] }}
+      transition={{
+        duration: 1.4,
+        delay: delayMs / 1000,
+        repeat: repeat ? Infinity : 0,
+        repeatDelay: repeat ? 2.5 : 0,
+        ease: "easeOut",
+      }}
+    >
+      {emoji}
+    </motion.span>
+  );
+}
+
+function SmellWave({ id, x, delayMs }: { id: string; x: number; delayMs: number }) {
+  return (
+    <motion.div
+      key={id}
+      style={{ position: "absolute", left: "50%", bottom: "78%", pointerEvents: "none" }}
+      initial={{ opacity: 0, x, y: 4 }}
+      animate={{ opacity: [0, 0.65, 0.45, 0], x: [x, x - 4, x + 6, x - 3], y: [2, -10, -22, -32] }}
+      transition={{ duration: 2.1, delay: delayMs / 1000, repeat: Infinity, ease: "easeInOut" }}
+    >
+      <div style={{ display: "flex", gap: 4 }}>
+        <span
+          style={{
+            display: "block",
+            height: 24,
+            width: 3,
+            borderRadius: 999,
+            background: "rgba(190,242,100,0.7)",
+          }}
+        />
+        <span
+          style={{
+            display: "block",
+            height: 20,
+            width: 3,
+            borderRadius: 999,
+            background: "rgba(110,231,183,0.55)",
+          }}
+        />
+      </div>
+    </motion.div>
+  );
+}
+
+export function PetEffects({
+  trigger,
+  readyToEvolve,
+  showEvolutionBurst,
+  isSleeping,
+  isAlive,
+  isEgg,
+  careNeed,
+  cleanliness,
+  isCleaningMode,
+}: PetEffectsProps) {
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      {/* Ready-to-evolve shimmer ring */}
+      {readyToEvolve && isAlive && (
+        <motion.div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: 96,
+            height: 96,
+            marginLeft: -48,
+            marginTop: -48,
+            borderRadius: "50%",
+            boxShadow: "0 0 0 3px rgba(52,211,153,0.6)",
+          }}
+          animate={{ opacity: [0.35, 0.9, 0.35], scale: [0.9, 1.08, 0.9] }}
+          transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+        />
+      )}
+
+      <AnimatePresence>
+        {trigger === "happy" &&
+          [0, 1, 2].map((i) => (
+            <FloatParticle key={`heart-${i}`} id={`heart-${i}`} emoji="❤️" x={(i - 1) * 22} delayMs={i * 200} />
+          ))}
+        {trigger === "eat" &&
+          [0, 1].map((i) => (
+            <FloatParticle key={`spark-${i}`} id={`spark-${i}`} emoji="✨" x={(i - 0.5) * 30} delayMs={i * 300} />
+          ))}
+        {trigger === "overfed" &&
+          [0, 1].map((i) => (
+            <FloatParticle key={`sick-${i}`} id={`sick-${i}`} emoji="🤢" x={(i - 0.5) * 28} delayMs={i * 300} />
+          ))}
+        {trigger === "overheated" &&
+          [0, 1, 2].map((i) => (
+            <FloatParticle
+              key={`hot-${i}`}
+              id={`hot-${i}`}
+              emoji={i === 1 ? "🥵" : "♨️"}
+              x={(i - 1) * 24}
+              delayMs={i * 180}
+            />
+          ))}
+      </AnimatePresence>
+
+      {/* Dirty smell waves — ambient while cleanliness is low and not mid-scrub */}
+      {!isCleaningMode &&
+        isAlive &&
+        cleanliness < 30 &&
+        [-18, 2, 20].map((xOff, i) => (
+          <SmellWave key={`smell-${i}`} id={`smell-${i}`} x={xOff} delayMs={i * 520} />
+        ))}
+
+      {/* Hunger/cold speech bubble */}
+      <AnimatePresence>
+        {isAlive && !isSleeping && careNeed < 25 && (
+          <motion.div
+            style={{
+              position: "absolute",
+              top: -34,
+              left: "50%",
+              transform: "translateX(-50%)",
+              whiteSpace: "nowrap",
+              borderRadius: 999,
+              padding: "3px 9px",
+              fontSize: 11,
+              fontWeight: 700,
+              background: "rgba(30,10,10,0.85)",
+              color: "#fecaca",
+              border: "1px solid rgba(248,113,113,0.4)",
+            }}
+            initial={{ opacity: 0, scale: 0.7, y: 6 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.7, y: 6 }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
+          >
+            {isEgg ? "🥶 Keep me warm!" : "🍔 I'm hungry!"}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Death dust */}
+      {!isAlive &&
+        [0, 1, 2, 3].map((i) => (
+          <motion.span
+            key={`dust-${i}`}
+            style={{ position: "absolute", left: "50%", top: "50%", fontSize: 16, pointerEvents: "none" }}
+            initial={{ opacity: 1, x: 0, y: 0 }}
+            animate={{ opacity: 0, x: (i % 2 === 0 ? -1 : 1) * (30 + i * 12), y: -(20 + i * 10) }}
+            transition={{ duration: 1.8, delay: i * 0.15 }}
+          >
+            💀
+          </motion.span>
+        ))}
+
+      {/* ZZZ sleeping */}
+      {isSleeping &&
+        isAlive &&
+        ["z", "Z", "z"].map((ch, i) => (
+          <motion.span
+            key={`zzz-${i}`}
+            style={{
+              position: "absolute",
+              right: 8,
+              top: 8,
+              fontSize: 10 + i * 4,
+              fontWeight: 700,
+              color: "#93c5fd",
+              pointerEvents: "none",
+            }}
+            initial={{ opacity: 0, x: 8 + i * 12, y: 0, scale: 0.6 }}
+            animate={{ opacity: [0, 1, 1, 0], y: -(20 + i * 14), scale: [0.6, 1, 0.7] }}
+            transition={{ duration: 2.4, delay: i * 0.75, repeat: Infinity, repeatDelay: 0.8 }}
+          >
+            {ch}
+          </motion.span>
+        ))}
+
+      {/* Evolution burst — 6 stars in a ring */}
+      {showEvolutionBurst &&
+        [0, 1, 2, 3, 4, 5].map((i) => {
+          const angle = (i * 60 * Math.PI) / 180;
+          const rx = Math.cos(angle) * 55;
+          const ry = Math.sin(angle) * 55;
+          return (
+            <motion.span
+              key={`star-${i}`}
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: "50%",
+                fontSize: 20,
+                pointerEvents: "none",
+              }}
+              initial={{ opacity: 1, x: 0, y: 0, scale: 0 }}
+              animate={{ opacity: [1, 1, 0], x: rx, y: ry, scale: [0, 1.5, 0] }}
+              transition={{ duration: 1.4, delay: i * 0.08, repeat: Infinity, repeatDelay: 0.55 }}
+            >
+              ⭐
+            </motion.span>
+          );
+        })}
+    </div>
+  );
+}

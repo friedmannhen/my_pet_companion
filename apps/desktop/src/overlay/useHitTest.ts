@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { isClickableOverrideActive } from "./clickableOverride";
 
 /**
  * Toggles OS-level click-through based on whether the cursor is over an
@@ -19,6 +20,9 @@ export function useHitTest(): boolean {
 
   useEffect(() => {
     const off = window.overlay.onCursor(({ x, y }) => {
+      // A capture-mode interaction (feed-throw, wash-scrub) is driving
+      // clickability directly — don't fight it every 80ms.
+      if (isClickableOverrideActive()) return;
       const el = document.elementFromPoint(x, y);
       const interactive = !!el?.closest("[data-interactive]");
       if (interactive !== clickableRef.current) {

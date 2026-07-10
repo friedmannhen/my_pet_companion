@@ -75,9 +75,8 @@ its menus are interactive.
 
 ### Feeding
 Open the dock drawer (see below) and find the pile of 🍖 in the
-**Kitchen & toy box**. **Press down on a piece and drag it straight off
-the pile** — the drawer closes and you're holding it. **Let go to throw**
-— the same momentum-based glide as throwing the pet itself. The food
+**Kitchen & toy box**. **Click a piece** to grab it — the drawer closes
+and it follows your cursor. **Click anywhere to throw it** — the food
 tumbles as it lands, and the pet **runs over and eats it**. Each piece you
 take leaves a gap in the pile that **regrows after 5 minutes** (the drawer
 shows a countdown until the next piece).
@@ -99,12 +98,12 @@ and progress pauses — you have to keep the sponge moving. Cancel anytime
 with **Esc**, **right-click**, or the **✕** button on the progress panel.
 
 ### Playing fetch
-**Press down on the ⚾ in the drawer and drag it out** — same grab as the
-food — then **release to throw it**. The ball glides, bounces, and the pet
-trots over, grabs it with a little bounce, winds up, and throws it back at
-you (a zoom-and-fade flourish, same beat as the old QA-hub widget). The
-ball's slot in the drawer sits empty until the pet is done playing, then
-the ball returns.
+**Click the ⚾ in the drawer** to grab it — same as food — then **click
+anywhere to throw it**. The ball glides, bounces, and the pet trots over,
+grabs it with a little bounce, winds up, and throws it back at you (a
+zoom-and-fade flourish, same beat as the old QA-hub widget). The ball's
+slot in the drawer sits empty until the pet is done playing, then the ball
+returns.
 
 ### Evolving
 Tapping a ready egg, or clicking ✨ Evolve! on a hatched pet, starts a

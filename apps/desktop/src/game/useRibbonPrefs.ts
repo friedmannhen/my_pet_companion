@@ -1,8 +1,8 @@
-// Persisted placement for the edge control ribbon (RibbonDock.tsx) — which
-// side of the screen it docks to, and how far down. Free continuous drag
-// (not discrete presets) — the user drops the tab anywhere along either
-// edge. Local-only (not synced): purely a per-machine display preference,
-// not game state.
+// Persisted placement for the SideDock tab — which side of the screen it
+// docks to and how far down. The tab drags vertically only; switching
+// sides is an explicit choice in the Settings view, not a drag outcome.
+// Local-only (not synced): purely a per-machine display preference, not
+// game state.
 import { useCallback, useEffect, useState } from "react";
 
 export type RibbonSide = "left" | "right";
@@ -31,9 +31,13 @@ export function useRibbonPrefs() {
     }
   }, [prefs]);
 
-  const setDock = useCallback((side: RibbonSide, y: number) => {
-    setPrefs({ side, y });
+  const setY = useCallback((y: number) => {
+    setPrefs((p) => ({ ...p, y }));
   }, []);
 
-  return { ...prefs, setDock };
+  const setSide = useCallback((side: RibbonSide) => {
+    setPrefs((p) => ({ ...p, side }));
+  }, []);
+
+  return { ...prefs, setY, setSide };
 }

@@ -3,19 +3,24 @@
 // so no pet exists to render or play with before authentication.
 //
 // UI architecture (per design intent): the overlay shows ONLY the pet, a
-// compact radial interaction menu, and an edge-docked control ribbon
-// (RibbonDock.tsx) — never a stock Electron window. Stats/progress live in
-// StatsDrawer.tsx, an in-overlay slide-out panel opened from the ribbon
-// (formerly a separate frameless BrowserWindow — retired once the drawer
-// pattern proved out, since living in the same renderer as the pet means it
-// can just read `game.save` directly).
+// compact radial interaction menu, and the SideDock (edge tab + fused
+// slide-out drawer) — never a stock Electron window. All stats/progress and
+// the grab-able care items (food pile, ball, sponge) live in the SideDock.
 //
 // Movement/interaction mechanics (wander springs, drag-glide throw,
 // feed/wash/ball gestures, particle timings) are ported from ERP_QA_HUB's
 // usePetMovement.ts / PetOverlay.tsx / PetEffects.tsx — see those files'
 // history for the original reference implementation this was studied from.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, animate, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
+import {
+  AnimatePresence,
+  animate,
+  motion,
+  useDragControls,
+  useMotionValue,
+  useSpring,
+  useTransform,
+} from "framer-motion";
 import type { AuthState } from "../supabase/useAuth";
 import { usePetGame } from "./usePetGame";
 import { useSessionLease } from "../session/useSessionLease";
@@ -23,9 +28,9 @@ import { usePetMovement } from "./usePetMovement";
 import { PetEffects, type PetFxTrigger } from "./PetEffects";
 import { AdminPanel } from "./AdminPanel";
 import { RadialMenu, type RadialAction } from "./RadialMenu";
-import { RibbonDock } from "./RibbonDock";
-import { StatsDrawer } from "./StatsDrawer";
+import { SideDock } from "./SideDock";
 import { useRibbonPrefs } from "./useRibbonPrefs";
+import { useConsumables } from "./useConsumables";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
 import catBaby from "../assets/pets/black_cat/black_cat_baby.png";
@@ -54,9 +59,35 @@ const chipStyle: React.CSSProperties = {
   color: "#fff",
 };
 
-const TUMBLE_EASE: [number, number, number, number] = [0.2, 0, 0.8, 1];
+const bannerStyle: React.CSSProperties = {
+  position: "fixed",
+  left: "50%",
+  top: 24,
+  transform: "translateX(-50%)",
+  padding: "6px 14px",
+  borderRadius: 999,
+  background: "rgba(20,20,26,0.85)",
+  color: "#fde68a",
+  fontSize: 12,
+  fontWeight: 600,
+  pointerEvents: "none",
+  zIndex: 20000,
+};
+
 const THROW_EASE: [number, number, number, number] = [0.3, 0, 1, 1];
 const PET_COOLDOWN_MS = 5 * 60 * 1000;
+
+interface DeltaPopup {
+  id: number;
+  icon: string;
+  value: number;
+  bornAt: number;
+}
+
+function fmtDelta(v: number): string {
+  const rounded = Math.abs(v) >= 10 ? Math.round(v) : Math.round(v * 10) / 10;
+  return `${v > 0 ? "+" : ""}${rounded}`;
+}
 
 export function GameView({ auth, clickable }: { auth: AuthState; clickable: boolean }) {
   const game = usePetGame(auth.userId);
@@ -64,11 +95,11 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const { save } = game;
 
   const ribbon = useRibbonPrefs();
+  const consumables = useConsumables();
   const [statsOpen, setStatsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [eggMenuOpen, setEggMenuOpen] = useState(false);
   const [feedPhase, setFeedPhase] = useState<"idle" | "held" | "released" | "eating">("idle");
-  const [ballPhase, setBallPhase] = useState<"idle" | "playing">("idle");
+  const [ballPhase, setBallPhase] = useState<"idle" | "held" | "playing">("idle");
   const [isEvolving, setIsEvolving] = useState(false);
   const [cleaningMode, setCleaningMode] = useState(false);
   const [scrubHeld, setScrubHeld] = useState(false);
@@ -129,6 +160,61 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     };
   }, []);
 
+  // ── Floating stat-delta popups ───────────────────────────────────────────
+  // After a deliberate care action (never ambient decay), diff the save
+  // before/after and float the real per-stat changes above the pet:
+  // "+40 🍖", "+5 ⭐", red "-5 ❤️" on an overfeed, etc. Diffing (rather than
+  // hardcoding the intended amounts) means proportional care points and
+  // clamped stats show what was actually earned. expectDeltaRef is armed
+  // right before each action call; rapid repeats (egg warming pulses)
+  // merge into a recent popup for the same stat instead of stacking spam.
+  const [deltaPopups, setDeltaPopups] = useState<DeltaPopup[]>([]);
+  const deltaIdRef = useRef(0);
+  const prevSaveRef = useRef(save);
+  const expectDeltaRef = useRef(false);
+
+  useEffect(() => {
+    const prev = prevSaveRef.current;
+    prevSaveRef.current = save;
+    if (!expectDeltaRef.current) return;
+    expectDeltaRef.current = false;
+    const diffs: [number, string][] = [
+      [save.hunger - prev.hunger, "🍖"],
+      [save.warmth - prev.warmth, "🔥"],
+      [save.cleanliness - prev.cleanliness, "🧼"],
+      [save.happiness - prev.happiness, "❤️"],
+      [save.carePoints - prev.carePoints, "⭐"],
+    ];
+    const now = Date.now();
+    setDeltaPopups((popups) => {
+      let next = [...popups];
+      for (const [value, icon] of diffs) {
+        if (Math.abs(value) < 0.05) continue;
+        const mergeable = next.find(
+          (p) => p.icon === icon && now - p.bornAt < 1200 && Math.sign(p.value) === Math.sign(value),
+        );
+        if (mergeable) {
+          next = next.map((p) => (p.id === mergeable.id ? { ...p, value: p.value + value } : p));
+        } else {
+          next.push({ id: ++deltaIdRef.current, icon, value, bornAt: now });
+        }
+      }
+      return next.slice(-8);
+    });
+    // Sweep expired popups a beat after the 2s float finishes.
+    const sweep = setTimeout(
+      () => setDeltaPopups((prev2) => prev2.filter((p) => Date.now() - p.bornAt < 2050)),
+      2200,
+    );
+    return () => clearTimeout(sweep);
+  }, [save]);
+
+  /** Arms the delta-diff for the save change the wrapped action causes. */
+  const withDeltas = useCallback((fn: () => void) => {
+    expectDeltaRef.current = true;
+    fn();
+  }, []);
+
   // Petting cooldown (ERP_QA_HUB's petRules.actionCooldowns.petMs) — without
   // this, Pet is a free, instantly-repeatable happiness/care-point source.
   const [petCooldownMs, setPetCooldownMs] = useState(0);
@@ -164,6 +250,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         gameRef.current.beginWarmSession();
         setWarming(true);
       }
+      expectDeltaRef.current = true;
       gameRef.current.warmTick();
     }, 200);
   }, []);
@@ -175,22 +262,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setTimeout(() => setFxTrigger((t) => (t === "happy" ? null : t)), 900);
   }, []);
 
-  const act = useCallback(
-    (fn: () => void, kind: "happy" | "none" = "none") => {
-      fn();
-      if (kind === "happy") pulseHappy();
-    },
-    [pulseHappy],
-  );
-
-  // ── Feed: grab, drag, release to throw ──────────────────────────────────
-  // Mirrors usePetMovement's own drag-glide physics exactly (explicit motion
-  // values + framer's `drag` prop + manual velocity tracking + a GLIDE
-  // projected landing point) — the food is data-interactive so the normal
-  // cursor-poll hit-test makes it grabbable, and while actively dragged its
-  // rendered position tracks the cursor 1:1, so the hit-test keeps landing
-  // on it even at speed (same reason pet-dragging never goes click-through
-  // mid-drag).
+  // ── Feed: grab a piece off the SideDock pile, drag, release to throw ────
+  // The flying food is an always-mounted motion.div whose drag is driven by
+  // dragControls: the pile piece's own pointerdown (in the drawer) hands us
+  // its live pointer event and we start the drag on THIS element with it —
+  // grabbing straight from the pile. clickableOverride keeps the whole
+  // window accepting mouse input during the gesture, since a fast flick
+  // outruns the 80ms cursor-poll hit-test.
+  const foodDragControls = useDragControls();
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
   const foodScale = useMotionValue(1);
@@ -198,22 +277,27 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const foodOpacity = useMotionValue(0);
   const foodVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
 
-  // Spawn point comes from wherever the user grabbed it from — the food
-  // pile inside StatsDrawer now, not a fixed spot near the pet (Feed no
-  // longer has its own radial-menu button).
-  const startFeedThrow = useCallback(
-    (spawnX: number, spawnY: number) => {
-      if (!save.isAlive || save.isSleeping || feedPhase !== "idle") return;
+  const canFeed = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
+  const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
+  const canClean = save.isAlive && !save.isSleeping && save.cleanliness < 100 && !petBusy;
+
+  const grabFood = useCallback(
+    (e: React.PointerEvent, slot: number) => {
+      if (!canFeed) return;
+      if (!consumables.takeFood(slot)) return;
       setStatsOpen(false);
       setMenuOpen(false);
-      foodX.set(spawnX - 20);
-      foodY.set(spawnY - 20);
+      setClickableOverride(true);
+      window.overlay.setClickable(true);
+      foodX.set(e.clientX - 20);
+      foodY.set(e.clientY - 20);
       foodScale.set(1);
       foodRotate.set(-8);
       foodOpacity.set(1);
       setFeedPhase("held");
+      foodDragControls.start(e);
     },
-    [save.isAlive, save.isSleeping, feedPhase, foodX, foodY, foodScale, foodRotate, foodOpacity],
+    [canFeed, consumables, foodDragControls, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
 
   const throwFood = useCallback(async () => {
@@ -235,6 +319,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setFeedPhase("eating");
     const wasOverfed = !game.isEgg && game.save.hunger >= 100;
     setFxTrigger(wasOverfed ? "overfed" : "eat");
+    expectDeltaRef.current = true;
     game.feed();
     await new Promise((r) => setTimeout(r, 450));
     await animate(foodScale, 0, { duration: 0.3, ease: "easeIn" });
@@ -263,50 +348,66 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, [foodX, foodY]);
 
   const foodDragEnd = useCallback(() => {
+    setClickableOverride(false);
     void throwFood();
   }, [throwFood]);
 
-  // ── Ball: fire-and-forget fetch sequence, QA-hub style ──────────────────
-  // Ball bounce-drop → pet walks to it → grab-bounce → "throw at the
-  // screen" zoom-fade flourish. Not user-drag-controlled (unlike feed) —
-  // this one plays itself out once triggered.
+  // ── Ball: grab from the SideDock, throw, pet fetches & throws back ──────
+  // Same grab-drag-release physics as food; after landing, the pet runs
+  // over, grab-bounces it, then "throws it at the screen" (zoom-fade,
+  // QA-hub style). The drawer's ball slot stays empty until the sequence
+  // finishes and returnBall() puts it back.
+  const ballDragControls = useDragControls();
   const ballX = useMotionValue(0);
   const ballY = useMotionValue(0);
   const ballScale = useMotionValue(0);
   const ballRotate = useMotionValue(0);
   const ballOpacity = useMotionValue(0);
+  const ballVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
 
-  const throwBallSequence = useCallback(async () => {
-    if (!save.isAlive || save.isSleeping || game.isEgg || petBusy) return;
-    setStatsOpen(false);
-    setMenuOpen(false);
+  const grabBall = useCallback(
+    (e: React.PointerEvent) => {
+      if (!canPlayBall) return;
+      if (!consumables.takeBall()) return;
+      setStatsOpen(false);
+      setMenuOpen(false);
+      setClickableOverride(true);
+      window.overlay.setClickable(true);
+      ballX.set(e.clientX - 17);
+      ballY.set(e.clientY - 17);
+      ballScale.set(1);
+      ballRotate.set(0);
+      ballOpacity.set(1);
+      setBallPhase("held");
+      ballDragControls.start(e);
+    },
+    [canPlayBall, consumables, ballDragControls, ballX, ballY, ballScale, ballRotate, ballOpacity],
+  );
+
+  const runBallFetch = useCallback(async () => {
     setBallPhase("playing");
+    const GLIDE = 0.16;
+    const { vx, vy } = ballVelRef.current;
+    const landX = Math.max(40, Math.min(window.innerWidth - 40, ballX.get() + vx * GLIDE));
+    const landY = Math.max(80, Math.min(window.innerHeight - 100, ballY.get() + vy * GLIDE));
 
-    const landX = 60 + Math.random() * (window.innerWidth - 180);
-    const landY = 80 + Math.random() * (window.innerHeight * 0.55);
-
-    ballX.set(landX);
-    ballY.set(-60);
-    ballScale.set(0.5);
-    ballRotate.set(0);
-    ballOpacity.set(1);
-
-    // Phase 1 — fall + spin to landing spot.
+    // Flight: glide to the landing spot with spin.
     await Promise.all([
-      animate(ballY, landY, { duration: 0.72, ease: TUMBLE_EASE }),
-      animate(ballRotate, 540, { duration: 0.72, ease: TUMBLE_EASE }),
-      animate(ballScale, 1, { duration: 0.72, ease: TUMBLE_EASE }),
+      animate(ballX, landX, { type: "spring", stiffness: 100, damping: 20 }),
+      animate(ballY, landY, { type: "spring", stiffness: 100, damping: 20 }),
+      animate(ballRotate, ballRotate.get() + 420, { duration: 0.6, ease: "easeOut" }),
     ]);
-    // Phase 1.5 — gravity bounce (2 diminishing hops).
-    await animate(ballY, landY - 32, { duration: 0.18, ease: "easeOut" });
-    await animate(ballY, landY, { duration: 0.14, ease: "easeIn" });
-    await animate(ballY, landY - 11, { duration: 0.1, ease: "easeOut" });
+    // Gravity bounce (2 diminishing hops).
+    await animate(ballY, landY - 24, { duration: 0.16, ease: "easeOut" });
+    await animate(ballY, landY, { duration: 0.13, ease: "easeIn" });
+    await animate(ballY, landY - 10, { duration: 0.1, ease: "easeOut" });
     await animate(ballY, landY, { duration: 0.09, ease: "easeIn" });
 
-    // Phase 2 — pet runs to the ball.
+    // Pet runs to the ball.
     await movement.walkTo(landX - 44, landY - 88);
 
-    // Phase 3 — grab: ball snaps to the pet with a quick bounce.
+    // Grab: ball snaps to the pet with a quick bounce.
+    expectDeltaRef.current = true;
     game.throwBall();
     pulseHappy();
     ballX.set(movement.x.get() + 40);
@@ -314,7 +415,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     await animate(ballScale, 1.5, { duration: 0.08 });
     await animate(ballScale, 1, { duration: 0.1 });
 
-    // Phase 4 — throw at the screen: grows toward center then fades.
+    // Throw back at the screen: grows toward center then fades.
     await Promise.all([
       animate(ballX, window.innerWidth / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
       animate(ballY, window.innerHeight / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
@@ -326,10 +427,33 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     ballScale.set(0);
     ballX.set(-200);
     ballY.set(-200);
+    consumables.returnBall();
     setBallPhase("idle");
-  }, [save.isAlive, save.isSleeping, game, petBusy, movement, pulseHappy, ballX, ballY, ballScale, ballRotate, ballOpacity]);
+  }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity]);
 
-  // ── Wash: hold sponge + scrub ────────────────────────────────────────────
+  const ballDragStart = useCallback(() => {
+    ballVelRef.current = { vx: 0, vy: 0, lastX: ballX.get(), lastY: ballY.get(), lastT: performance.now() };
+  }, [ballX, ballY]);
+
+  const ballDrag = useCallback(() => {
+    const now = performance.now();
+    const v = ballVelRef.current;
+    const dt = now - v.lastT;
+    if (dt > 0 && dt < 100) {
+      v.vx = ((ballX.get() - v.lastX) / dt) * 1000;
+      v.vy = ((ballY.get() - v.lastY) / dt) * 1000;
+    }
+    v.lastX = ballX.get();
+    v.lastY = ballY.get();
+    v.lastT = now;
+  }, [ballX, ballY]);
+
+  const ballDragEnd = useCallback(() => {
+    setClickableOverride(false);
+    void runBallFetch();
+  }, [runBallFetch]);
+
+  // ── Wash: hold sponge + scrub (entered from the SideDock's sponge) ──────
   const scrubHeldRef = useRef(false);
   const scrubTargetRef = useRef(1000);
   const lastScrubPointRef = useRef<{ x: number; y: number } | null>(null);
@@ -339,7 +463,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const scrubCursorRef = useRef({ x: 0, y: 0 });
 
   const endCleaning = useCallback((completed: boolean) => {
-    if (completed) gameRef.current.wash();
+    if (completed) {
+      expectDeltaRef.current = true;
+      gameRef.current.wash();
+    }
     setCleaningMode(false);
     setScrubHeld(false);
     scrubHeldRef.current = false;
@@ -358,8 +485,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const startCleaning = useCallback(() => {
     if (!save.isAlive || save.isSleeping || save.cleanliness >= 100) return;
+    setStatsOpen(false);
     setMenuOpen(false);
-    setEggMenuOpen(false);
     const missing = Math.max(0, 100 - Math.round(save.cleanliness));
     scrubTargetRef.current = Math.min(10, Math.max(1, missing / 10)) * 1000;
     setScrubProgress(0);
@@ -505,7 +632,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const handleEvolve = useCallback(() => {
     if (petBusy) return;
     setMenuOpen(false);
-    setEggMenuOpen(false);
     setIsEvolving(true);
     setTimeout(() => {
       setEvolvePulse(true);
@@ -517,29 +643,29 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     }, 10000);
   }, [game, petBusy]);
 
-  // Feed and Ball moved to StatsDrawer's kitchen/toy box — the radial menu
-  // only handles instant-click care actions now. While asleep, the only
-  // meaningful action is waking up, so nothing else even shows.
+  // Feed/Wash/Ball all live in the SideDock now — the radial menu only
+  // handles instant-click care actions. While asleep, the only meaningful
+  // action is waking up, so nothing else even shows.
   const radialActions: RadialAction[] = save.isSleeping
     ? [{ key: "sleep", icon: "☀️", label: "Wake", onClick: game.toggleSleep }]
     : [
-        { key: "wash", icon: "🧼", label: "Wash", onClick: startCleaning, disabled: save.cleanliness >= 100 },
-        { key: "pet", icon: "🤗", label: "Pet", onClick: () => act(game.pet, "happy"), disabled: petCooldownMs > 0 },
+        {
+          key: "pet",
+          icon: "🤗",
+          label: petCooldownMs > 0 ? `Pet (${Math.ceil(petCooldownMs / 60000)}m)` : "Pet",
+          onClick: () => {
+            withDeltas(game.pet);
+            pulseHappy();
+          },
+          disabled: petCooldownMs > 0,
+        },
         { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
       ];
   if (!save.isSleeping && game.canEvolve) {
     radialActions.push({ key: "evolve", icon: "✨", label: "Evolve!", onClick: handleEvolve, highlight: true });
   }
 
-  const eggActions: RadialAction[] = [
-    { key: "wash", icon: "🧼", label: "Clean", onClick: startCleaning, disabled: save.cleanliness >= 100 },
-  ];
-
-  const canFeed = save.isAlive && !save.isSleeping && feedPhase === "idle";
-  const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
-
   const showRadial = !game.isEgg && save.isAlive && menuOpen && !petBusy;
-  const showEggMenu = game.isEgg && save.isAlive && eggMenuOpen && !petBusy;
 
   const idleBreathing =
     save.isAlive && !game.isEgg && !save.isSleeping && !movement.isMoving && !petBusy && !happyPulse && !evolvePulse;
@@ -589,39 +715,37 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
       {import.meta.env.DEV && <AdminPanel game={game} />}
 
-      {/* Edge control tab — drag to redock anywhere on either edge, click to
-          open the drawer directly (no intermediate popover). */}
-      <RibbonDock
+      <SideDock
         side={ribbon.side}
         y={ribbon.y}
-        onDock={ribbon.setDock}
+        onYChange={ribbon.setY}
+        onSideChange={ribbon.setSide}
         open={statsOpen}
         onToggle={() => setStatsOpen((o) => !o)}
-        syncStatus={game.syncStatus}
-        syncError={game.syncError}
-      />
-      <StatsDrawer
-        open={statsOpen}
         onClose={() => setStatsOpen(false)}
         game={game}
         auth={auth}
-        side={ribbon.side}
         lease={lease}
         canFeed={canFeed}
+        foodReady={consumables.foodReady}
+        foodEtaMs={consumables.foodEtaMs}
+        onGrabFood={grabFood}
+        ballReady={consumables.ballReady}
         canPlayBall={canPlayBall}
-        onCollectFood={startFeedThrow}
-        onThrowBall={() => void throwBallSequence()}
+        onGrabBall={grabBall}
+        canClean={canClean}
+        onStartClean={startCleaning}
         onSignOut={auth.signOut}
         onQuit={() => window.overlay.quit()}
       />
 
-      {/* Food — always mounted so the very first .set() call (before any
-          conditional remount) actually lands on a live motion value. Grab
-          it (data-interactive makes it hit-testable), drag, and release to
-          throw — same physics family as dragging the pet itself. */}
+      {/* Food — always mounted so dragControls.start() from the pile's
+          pointerdown lands on a live element. dragListener is off: the ONLY
+          way to move it is grabbing it from the pile. */}
       <motion.div
-        data-interactive
-        drag={feedPhase === "held"}
+        drag
+        dragControls={foodDragControls}
+        dragListener={false}
         dragMomentum={false}
         dragElastic={0}
         onDragStart={foodDragStart}
@@ -632,48 +756,35 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           left: 0,
           top: 0,
           fontSize: 40,
-          zIndex: 20000,
+          zIndex: 26000,
           x: foodX,
           y: foodY,
           scale: foodScale,
           rotate: foodRotate,
           opacity: foodOpacity,
-          cursor: feedPhase === "held" ? "grab" : "default",
-          pointerEvents: feedPhase === "held" ? "auto" : "none",
+          pointerEvents: "none",
         }}
       >
         🍖
       </motion.div>
-      {feedPhase === "held" && (
-        <div
-          style={{
-            position: "fixed",
-            left: "50%",
-            top: 24,
-            transform: "translateX(-50%)",
-            padding: "6px 14px",
-            borderRadius: 999,
-            background: "rgba(20,20,26,0.85)",
-            color: "#fde68a",
-            fontSize: 12,
-            fontWeight: 600,
-            pointerEvents: "none",
-            zIndex: 20000,
-          }}
-        >
-          🍖 Drag the food, then let go to throw it!
-        </div>
-      )}
+      {feedPhase === "held" && <div style={bannerStyle}>🍖 Throw the food to your pet!</div>}
 
-      {/* Ball — same always-mounted pattern, but this one plays itself out
-          (fire-and-forget), not user-dragged. */}
+      {/* Ball — same always-mounted pattern. */}
       <motion.div
+        drag
+        dragControls={ballDragControls}
+        dragListener={false}
+        dragMomentum={false}
+        dragElastic={0}
+        onDragStart={ballDragStart}
+        onDrag={ballDrag}
+        onDragEnd={ballDragEnd}
         style={{
           position: "fixed",
           left: 0,
           top: 0,
           fontSize: 34,
-          zIndex: 20000,
+          zIndex: 26000,
           pointerEvents: "none",
           x: ballX,
           y: ballY,
@@ -684,6 +795,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       >
         ⚾
       </motion.div>
+      {ballPhase === "held" && <div style={bannerStyle}>⚾ Throw the ball — your pet will fetch it!</div>}
 
       {/* Wash: sponge cursor + progress + bubbles */}
       {cleaningMode && (
@@ -802,6 +914,30 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           <div style={{ position: "absolute", top: -18, right: 8, fontSize: 18, pointerEvents: "none" }}>❗</div>
         )}
 
+        {/* Floating stat-delta popups (+40 🍖 / -5 ❤️ …) — rendered on the
+            un-flipped outer container so text never mirrors. */}
+        {deltaPopups.map((p, i) => (
+          <motion.div
+            key={p.id}
+            initial={{ opacity: 0, y: 4, scale: 0.7 }}
+            animate={{ opacity: [0, 1, 1, 0], y: -48 - (i % 2) * 14, scale: 1 }}
+            transition={{ duration: 2, ease: "easeOut" }}
+            style={{
+              position: "absolute",
+              top: -6,
+              left: PET_SIZE / 2 - 28 + ((p.id % 3) - 1) * 30,
+              fontSize: 14,
+              fontWeight: 800,
+              whiteSpace: "nowrap",
+              pointerEvents: "none",
+              color: p.value >= 0 ? "#4ade80" : "#f87171",
+              textShadow: "0 1px 4px rgba(0,0,0,0.85)",
+            }}
+          >
+            {fmtDelta(p.value)} {p.icon}
+          </motion.div>
+        ))}
+
         {/*
           Two nested layers deliberately kept separate: framer-motion owns
           this outer div's `transform` (lean offset + facing flip via
@@ -813,10 +949,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           that entirely.
         */}
         <motion.div
-          // A ready-to-hatch egg has no radial menu (eggs only hold-to-warm
-          // or right-click-to-clean), so a plain tap is its hatch trigger —
-          // a quick tap never becomes a "hold" (startWarmHold's interval
-          // hasn't ticked yet), so this can't be mistaken for warming.
+          // A ready-to-hatch egg has no radial menu (eggs only hold-to-warm),
+          // so a plain tap is its hatch trigger — a quick tap never becomes
+          // a "hold" (startWarmHold's interval hasn't ticked yet), so this
+          // can't be mistaken for warming.
           onClick={
             game.isEgg
               ? game.canHatch && !petBusy
@@ -825,14 +961,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               : petBusy
                 ? undefined
                 : () => setMenuOpen((o) => !o)
-          }
-          onContextMenu={
-            game.isEgg && !petBusy
-              ? (e) => {
-                  e.preventDefault();
-                  setEggMenuOpen((o) => !o);
-                }
-              : undefined
           }
           onPointerDown={game.isEgg && save.isAlive && !petBusy ? startWarmHold : undefined}
           onPointerUp={game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
@@ -883,7 +1011,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         </motion.div>
 
         <AnimatePresence>{showRadial && <RadialMenu key="radial" actions={radialActions} />}</AnimatePresence>
-        <AnimatePresence>{showEggMenu && <RadialMenu key="egg-radial" actions={eggActions} radius={60} />}</AnimatePresence>
 
         {!save.isAlive && menuOpen && (
           <div

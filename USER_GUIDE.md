@@ -30,15 +30,14 @@ its menus are interactive.
   Holding pulses warmth and care points continuously.
 - **Drag the egg** to move it anywhere on screen — a real drag (not just a
   hold) automatically cancels warming, so the two gestures don't fight.
-- **Right-click the egg** to open a small menu with a 🧼 **Clean** action
-  (same scrubbing mini-game as a hatched pet — see "Washing" below).
+- Eggs can be **washed** too — grab the sponge from the dock drawer (see
+  "Washing" below).
 - Once care points reach the hatch threshold, tapping the egg **hatches
   it** — see "Evolving" below for what that looks like.
 
 ### Hatched pet (baby / adult / final)
 - **Click the pet** to open the radial interaction menu — a ring of action
   buttons pops out around it:
-  - 🧼 **Wash** — see "Washing" below.
   - 🤗 **Pet** — pets the pet, hearts float up. Has a **5-minute cooldown**
     (grayed out until it's up) so it can't be spammed for free happiness.
   - 🌙 **Tuck in** — manual sleep toggle. This is *protected sleep*: stats
@@ -47,9 +46,12 @@ its menus are interactive.
   - ✨ **Evolve!** (appears only when ready) — see "Evolving" below.
 - While the pet is **asleep**, the menu only shows **☀️ Wake** — every
   other action is hidden (not just disabled) until it wakes up.
-- Feed and Ball aren't on this menu anymore — see "Feeding" and "Playing
-  fetch" below, both now live in the stats drawer's kitchen/toy box.
+- Feed, Wash and Ball aren't on this menu — the food pile, sponge, and
+  ball all live in the dock drawer's **Kitchen & toy box** (see below).
 - Click the pet again (or click elsewhere) to close the menu.
+- Every care action floats **+X indicators** above the pet showing exactly
+  what you earned (e.g. `+40 🍖`, `+5 ⭐`) — green for gains, red for
+  losses (like overfeeding).
 - **Drag the pet** with the mouse to pick it up and move it — release to
   throw it, and it glides to a stop based on how fast you were moving it
   when you let go.
@@ -63,20 +65,20 @@ its menus are interactive.
   menu mid-scrub.
 
 ### Feeding
-Open the stats drawer (see below) and find the small pile of 🍖 in the
-**Kitchen & toy box** section. **Click a piece to grab it** — the drawer
-closes and the food appears in your hand at that spot. **Drag it wherever
-you like and let go to throw it** — the same grab-drag-release gesture as
-dragging the pet itself, including the same momentum-based glide when you
-release. The food tumbles as it lands, and the pet **runs over and eats
-it**.
+Open the dock drawer (see below) and find the pile of 🍖 in the
+**Kitchen & toy box**. **Press down on a piece and drag it straight off
+the pile** — the drawer closes and you're holding it. **Let go to throw**
+— the same momentum-based glide as throwing the pet itself. The food
+tumbles as it lands, and the pet **runs over and eats it**. Each piece you
+take leaves a gap in the pile that **regrows after 5 minutes** (the drawer
+shows a countdown until the next piece).
 
 Feeding a pet whose hunger is already full is an **overfeed**: instead of
 the usual gain, it costs happiness and care points (and the pet looks a bit
 sick 🤢) — so there's a real reason not to spam it.
 
 ### Washing
-Click 🧼 Wash (or right-click the egg → Clean) to grab the sponge — your
+Grab the 🧽 sponge from the drawer's Kitchen & toy box (click it) — your
 cursor becomes a sponge, and light rain/water-drop effects appear over the
 pet while you work. **Hold the left mouse button down and move the sponge
 back and forth over the pet** to scrub. A progress bar shows how much
@@ -87,11 +89,12 @@ you have to keep the sponge moving. Cancel anytime with **Esc**,
 **right-click**, or the **✕** button on the progress panel.
 
 ### Playing fetch
-Open the stats drawer and click the ⚾ in the **Kitchen & toy box**
-section — this one plays itself out: the drawer closes, the ball bounces
-onto the screen, the pet trots over and grabs it with a little bounce, then
-winds up and throws it back at you (a zoom-and-fade flourish), same beat as
-the old QA-hub widget's fetch animation.
+**Press down on the ⚾ in the drawer and drag it out** — same grab as the
+food — then **release to throw it**. The ball glides, bounces, and the pet
+trots over, grabs it with a little bounce, winds up, and throws it back at
+you (a zoom-and-fade flourish, same beat as the old QA-hub widget). The
+ball's slot in the drawer sits empty until the pet is done playing, then
+the ball returns.
 
 ### Evolving
 Tapping a ready egg, or clicking ✨ Evolve! on a hatched pet, starts a
@@ -103,26 +106,29 @@ The pet can't be interacted with again until the charge-up finishes.
 If a pet's care need (hunger, or warmth for an egg) hits zero, it dies.
 Click it to see a "didn't make it" message with a **Start over** button.
 
-## Control tab & stats drawer (screen edge)
+## The dock (house tab + drawer)
 
-A small tab docked to a screen edge, showing the house icon.
-- **Click it** to slide out the full stats drawer directly from the same
-  edge — no intermediate menu. The drawer shows the food/ball
-  "Kitchen & toy box" (see "Feeding" / "Playing fetch" above), pet stats,
-  care-point progress, age, lifetime action counts, and — at the bottom —
-  account actions: **⚠️ Take over** (only shown if your account is already
-  active on another device — click it to make *this* the live session),
-  **Sign out**, and **Quit**. It's part of the pet overlay itself (not a
-  separate window), so it updates the instant you interact with the pet.
-  Click the tab again, or the **✕** in the drawer's header, to close it.
-- **Drag the tab** to reposition it — drop it anywhere near either edge of
-  the screen and it snaps to that edge at whatever height you dropped it
-  (no separate side/height buttons). Your placement is remembered between
-  launches. When the drawer is open, the tab rides along attached to its
-  outer edge, like a handle, instead of being draggable.
+A house-icon tab sits fused to one screen edge — it's the handle of the
+game's drawer.
+- **Click the tab** to slide the drawer out (and again to close it — or
+  use the **✕** in the drawer's header). The tab and drawer are one
+  connected piece: the tab rides along with the drawer as it opens.
+- **Drag the tab up/down** to set its height on the edge (vertical only —
+  which edge it lives on is a Settings choice). Height is remembered
+  between launches.
+- The drawer's **home view** shows the Kitchen & toy box (food pile,
+  ball, sponge), all stat bars with their icons (🍖/🔥, 🧼, ❤️) plus a
+  **gold ⭐ care-points bar** tracking progress to the next evolution,
+  age/stage info, and lifetime care history. It's part of the pet overlay
+  itself (not a separate window), so it updates the instant you interact
+  with the pet.
+- The **⚙ Settings view** (gear button in the drawer header) has: dock
+  side (left/right edge), **⚠️ Take over** (only shown if your account is
+  active on another device — click to make *this* the live session),
+  **Sign out**, and **Quit**. A red sync-error message appears here too if
+  something's wrong with cloud sync.
 - A colored dot on the tab shows cloud-sync status at a glance (green =
-  synced, yellow = syncing, gray = offline). If there's an actual sync
-  error, a red message appears inside the drawer instead of just the dot.
+  synced, yellow = syncing, gray = offline, red = error).
 
 ## Dev-only: admin panel
 

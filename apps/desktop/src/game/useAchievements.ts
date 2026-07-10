@@ -67,6 +67,11 @@ export interface UseAchievements {
   multipliers: Record<AchievementBonusCategory, number>;
   progress: (code: PetAchievementCode) => number;
   claim: (code: PetAchievementCode) => void;
+  /** Dev-only: wipes local cache + cloud rows back to fresh. Note the pet's
+   * own lifetime counters aren't touched, so already-crossed tiers will
+   * immediately re-populate as claimable on the next evaluation pass —
+   * that's expected for a reset-for-testing tool. */
+  resetAll: () => Promise<void>;
 }
 
 export function useAchievements(userId: string | null, save: PetSaveData): UseAchievements {
@@ -163,11 +168,19 @@ export function useAchievements(userId: string | null, save: PetSaveData): UseAc
     [save],
   );
 
+  const resetAll = useCallback(async () => {
+    setState(freshAchievementState());
+    if (!supabase || !userId) return;
+    const { error } = await supabase.from("achievements").delete().eq("user_id", userId);
+    if (error) console.error("[achievements] reset failed:", error);
+  }, [userId]);
+
   return {
     state,
     claimableCount: countClaimableAchievements(state),
     multipliers: computeCategoryBonusMultipliers(state),
     progress,
     claim,
+    resetAll,
   };
 }

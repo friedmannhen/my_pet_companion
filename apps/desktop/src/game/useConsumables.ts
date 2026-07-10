@@ -35,6 +35,8 @@ export interface Consumables {
   ballReady: boolean;
   takeBall: () => boolean;
   returnBall: () => void;
+  /** Dev-only: instantly refills the whole food pile and returns the ball. */
+  resetAll: () => void;
 }
 
 export function useConsumables(): Consumables {
@@ -80,6 +82,11 @@ export function useConsumables(): Consumables {
 
   const returnBall = useCallback(() => setBallOut(false), []);
 
+  const resetAll = useCallback(() => {
+    setFoodRespawnAt(Array(FOOD_SLOT_COUNT).fill(0));
+    setBallOut(false);
+  }, []);
+
   return {
     foodReady: foodRespawnAt.map((t) => t <= now),
     foodEtaMs: foodRespawnAt.map((t) => Math.max(0, t - now)),
@@ -87,5 +94,6 @@ export function useConsumables(): Consumables {
     ballReady: !ballOut,
     takeBall,
     returnBall,
+    resetAll,
   };
 }

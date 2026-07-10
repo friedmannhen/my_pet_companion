@@ -12,6 +12,7 @@ import {
   clampStat,
   countClaimableQuests,
   evaluatePassiveQuests,
+  freshPetQuestState,
   freshPetSave,
   localCalendar,
   markOverfeedQuestFailure,
@@ -113,6 +114,9 @@ export interface PetGame {
   debugApply: (patch: Partial<PetSaveData>) => void;
   debugLoadPreset: (preset: PetSaveData) => void;
   debugTimeJump: (hours: number) => void;
+  debugClearCooldowns: () => void;
+  debugResetQuests: () => void;
+  debugResetHallOfFame: () => Promise<void>;
 }
 
 export type SyncStatus = "offline" | "loading" | "synced" | "error";
@@ -546,19 +550,86 @@ export function usePetGame(userId: string | null): PetGame {
 
   const debugLoadPreset = useCallback((preset: PetSaveData) => setSave(preset), []);
 
-  /** Simulates "the app was closed for N hours": shifts all clocks back, then replays. */
+  /**
+   * Simulates "the app was closed for N hours": shifts all clocks back
+   * (decay timestamps AND every interaction/cooldown timer — lastFed/
+   * lastWashed/lastPetted plus the quest engine's 1h qualified-action gaps
+   * — so cooldown-gated things actually clear when you jump forward far
+   * enough), then replays decay.
+   */
   const debugTimeJump = useCallback((hours: number) => {
     setSave((prev) => {
       const shiftMs = hours * 3_600_000;
       const shift = (iso: string) => new Date(new Date(iso).getTime() - shiftMs).toISOString();
+      const quests = prev.quests
+        ? {
+            ...prev.quests,
+            daily: {
+              ...prev.quests.daily,
+              lastQualifiedFeedAt: prev.quests.daily.lastQualifiedFeedAt
+                ? shift(prev.quests.daily.lastQualifiedFeedAt)
+                : undefined,
+              lastQualifiedWashAt: prev.quests.daily.lastQualifiedWashAt
+                ? shift(prev.quests.daily.lastQualifiedWashAt)
+                : undefined,
+              lastQualifiedPetAt: prev.quests.daily.lastQualifiedPetAt
+                ? shift(prev.quests.daily.lastQualifiedPetAt)
+                : undefined,
+            },
+          }
+        : prev.quests;
       return applyDecay({
         ...prev,
         lastDecayTick: shift(prev.lastDecayTick),
         lastInteraction: shift(prev.lastInteraction),
+        lastFed: shift(prev.lastFed),
+        lastWashed: shift(prev.lastWashed),
+        lastPetted: shift(prev.lastPetted),
         sleepStartedAt: prev.sleepStartedAt ? shift(prev.sleepStartedAt) : undefined,
+        quests,
       });
     });
   }, []);
+
+  /** Instantly clears every cooldown/gap (petting UI cooldown, quest
+   * qualified-action gaps) without touching stats/decay — a quick "test the
+   * next click" button distinct from a full time jump. */
+  const debugClearCooldowns = useCallback(() => {
+    setSave((prev) => {
+      const farPast = new Date(0).toISOString();
+      return {
+        ...prev,
+        lastFed: farPast,
+        lastWashed: farPast,
+        lastPetted: farPast,
+        quests: prev.quests
+          ? {
+              ...prev.quests,
+              daily: {
+                ...prev.quests.daily,
+                lastQualifiedFeedAt: undefined,
+                lastQualifiedWashAt: undefined,
+                lastQualifiedPetAt: undefined,
+              },
+            }
+          : prev.quests,
+      };
+    });
+  }, []);
+
+  /** Resets quest progress/claims to fresh without touching the pet itself. */
+  const debugResetQuests = useCallback(() => {
+    setSave((prev) => ({ ...prev, quests: freshPetQuestState(new Date(), calendar) }));
+  }, []);
+
+  /** Deletes every hall-of-fame row this account claimed, freeing those
+   * global milestones back up (dev-only — real players never get this). */
+  const debugResetHallOfFame = useCallback(async () => {
+    if (!supabase || !userId) return;
+    hofClaimedRef.current = false;
+    const { error } = await supabase.from("hall_of_fame").delete().eq("user_id", userId);
+    if (error) console.error("[debug] hall of fame reset failed:", error);
+  }, [userId]);
 
   const nextThreshold =
     save.evolutionStage >= 3 ? null : rules.evolutionThresholds[(save.evolutionStage + 1) as 1 | 2 | 3];
@@ -594,5 +665,8 @@ export function usePetGame(userId: string | null): PetGame {
     debugApply,
     debugLoadPreset,
     debugTimeJump,
+    debugClearCooldowns,
+    debugResetQuests,
+    debugResetHallOfFame,
   };
 }

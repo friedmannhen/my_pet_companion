@@ -288,11 +288,17 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // The flying food is an always-mounted motion.div positioned purely via
   // plain `window` mousemove/mouseup tracking (NOT framer's drag/dragControls
   // — a cross-element "start a drag on a different, always-mounted element
-  // from a pile item's pointerdown" handoff proved unreliable here). This is
-  // the same battle-tested pattern already used by the wash sponge cursor
-  // and the pet's own drag: clickableOverride keeps the whole window
-  // accepting mouse input during the gesture, since a fast flick outruns the
-  // 80ms cursor-poll hit-test.
+  // from a pile item's pointerdown" handoff proved unreliable here).
+  //
+  // The mousemove/mouseup listeners are attached SYNCHRONOUSLY inside the
+  // same onPointerDown handler that starts the grab — not via a useEffect
+  // reacting to feedPhase turning "held". A useEffect only runs after React
+  // commits the state change (a render + a scheduled effect pass), and for
+  // a quick click (press, then release almost immediately — no real hold)
+  // the native mouseup can fire before that effect ever attaches, so the
+  // release is silently missed and nothing happens beyond the pile fading.
+  // Wash doesn't hit this because it starts on onClick (fires only after
+  // mouseup already happened), not onPointerDown.
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
   const foodScale = useMotionValue(1);
@@ -303,6 +309,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const canFeed = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
   const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
   const canClean = save.isAlive && !save.isSleeping && save.cleanliness < 100 && !petBusy;
+
+  const throwFoodRef = useRef<() => void>(() => {});
 
   const grabFood = useCallback(
     (e: React.PointerEvent, slot: number) => {
@@ -321,6 +329,30 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       foodOpacity.set(1);
       foodVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setFeedPhase("held");
+
+      const onMove = (ev: MouseEvent) => {
+        const now = performance.now();
+        const v = foodVelRef.current;
+        const nx = ev.clientX - 20;
+        const ny = ev.clientY - 20;
+        const dt = now - v.lastT;
+        if (dt > 0 && dt < 100) {
+          v.vx = ((nx - v.lastX) / dt) * 1000;
+          v.vy = ((ny - v.lastY) / dt) * 1000;
+        }
+        v.lastX = nx;
+        v.lastY = ny;
+        v.lastT = now;
+        foodX.set(nx);
+        foodY.set(ny);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        throwFoodRef.current();
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     },
     [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
@@ -356,33 +388,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setFxTrigger(null);
     setFeedPhase("idle");
   }, [foodX, foodY, foodScale, foodOpacity, movement, game, sfx]);
-
-  useEffect(() => {
-    if (feedPhase !== "held") return;
-    const onMove = (e: MouseEvent) => {
-      const now = performance.now();
-      const v = foodVelRef.current;
-      const x = e.clientX - 20;
-      const y = e.clientY - 20;
-      const dt = now - v.lastT;
-      if (dt > 0 && dt < 100) {
-        v.vx = ((x - v.lastX) / dt) * 1000;
-        v.vy = ((y - v.lastY) / dt) * 1000;
-      }
-      v.lastX = x;
-      v.lastY = y;
-      v.lastT = now;
-      foodX.set(x);
-      foodY.set(y);
-    };
-    const onUp = () => void throwFood();
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [feedPhase, foodX, foodY, throwFood]);
+  throwFoodRef.current = () => void throwFood();
 
   // ── Ball: grab from the SideDock, throw, pet fetches & throws back ──────
   // Same grab-drag-release physics as food; after landing, the pet runs
@@ -395,6 +401,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const ballRotate = useMotionValue(0);
   const ballOpacity = useMotionValue(0);
   const ballVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
+  const runBallFetchRef = useRef<() => void>(() => {});
 
   const grabBall = useCallback(
     (e: React.PointerEvent) => {
@@ -413,6 +420,30 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       ballOpacity.set(1);
       ballVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setBallPhase("held");
+
+      const onMove = (ev: MouseEvent) => {
+        const now = performance.now();
+        const v = ballVelRef.current;
+        const nx = ev.clientX - 17;
+        const ny = ev.clientY - 17;
+        const dt = now - v.lastT;
+        if (dt > 0 && dt < 100) {
+          v.vx = ((nx - v.lastX) / dt) * 1000;
+          v.vy = ((ny - v.lastY) / dt) * 1000;
+        }
+        v.lastX = nx;
+        v.lastY = ny;
+        v.lastT = now;
+        ballX.set(nx);
+        ballY.set(ny);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        runBallFetchRef.current();
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     },
     [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity],
   );
@@ -464,33 +495,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     consumables.returnBall();
     setBallPhase("idle");
   }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity]);
-
-  useEffect(() => {
-    if (ballPhase !== "held") return;
-    const onMove = (e: MouseEvent) => {
-      const now = performance.now();
-      const v = ballVelRef.current;
-      const x = e.clientX - 17;
-      const y = e.clientY - 17;
-      const dt = now - v.lastT;
-      if (dt > 0 && dt < 100) {
-        v.vx = ((x - v.lastX) / dt) * 1000;
-        v.vy = ((y - v.lastY) / dt) * 1000;
-      }
-      v.lastX = x;
-      v.lastY = y;
-      v.lastT = now;
-      ballX.set(x);
-      ballY.set(y);
-    };
-    const onUp = () => void runBallFetch();
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [ballPhase, ballX, ballY, runBallFetch]);
+  runBallFetchRef.current = () => void runBallFetch();
 
   // ── Wash: hold sponge + scrub (entered from the SideDock's sponge) ──────
   const scrubHeldRef = useRef(false);
@@ -779,7 +784,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         </div>
       )}
 
-      {import.meta.env.DEV && <AdminPanel game={game} />}
+      {import.meta.env.DEV && <AdminPanel game={game} consumables={consumables} />}
 
       <SideDock
         side={ribbon.side}

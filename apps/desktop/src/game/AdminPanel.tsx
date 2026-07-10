@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { DEFAULT_PET_RULES, freshPetSave, type PetSaveData } from "@pet/core";
 import type { PetGame } from "./usePetGame";
+import type { Consumables } from "./useConsumables";
 
 const T = DEFAULT_PET_RULES.evolutionThresholds;
 
@@ -112,9 +113,24 @@ const btn: React.CSSProperties = {
   textAlign: "left",
 };
 
-export function AdminPanel({ game }: { game: PetGame }) {
+const dangerBtn: React.CSSProperties = {
+  ...btn,
+  background: "rgba(248,113,113,0.25)",
+};
+
+export function AdminPanel({ game, consumables }: { game: PetGame; consumables: Consumables }) {
   const [open, setOpen] = useState(false);
   const { save } = game;
+
+  const fullReset = () => {
+    if (!confirm("Full reset: pet, quests, achievements, hall-of-fame claims, and the food/ball pile. Continue?")) {
+      return;
+    }
+    game.restart();
+    void game.achievements.resetAll();
+    void game.debugResetHallOfFame();
+    consumables.resetAll();
+  };
 
   return (
     <div
@@ -183,7 +199,8 @@ export function AdminPanel({ game }: { game: PetGame }) {
           </div>
 
           <span style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>
-            Time jump (simulate app closed)
+            Time jump (simulate app closed — also clears feed/wash/pet
+            cooldowns &amp; quest gaps)
           </span>
           <div style={{ display: "flex", gap: 4 }}>
             {[1, 12, 80].map((h) => (
@@ -191,6 +208,32 @@ export function AdminPanel({ game }: { game: PetGame }) {
                 +{h}h
               </button>
             ))}
+          </div>
+
+          <span style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>Cooldowns &amp; items</span>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button style={btn} onClick={game.debugClearCooldowns}>
+              ⏱️ Clear cooldowns
+            </button>
+            <button style={btn} onClick={consumables.resetAll}>
+              🍖⚾ Refill pile
+            </button>
+          </div>
+
+          <span style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>Reset</span>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+            <button style={btn} onClick={game.debugResetQuests}>
+              📜 Quests only
+            </button>
+            <button style={btn} onClick={() => void game.achievements.resetAll()}>
+              🏆 Achievements only
+            </button>
+            <button style={btn} onClick={() => void game.debugResetHallOfFame()}>
+              🏛️ My hall-of-fame claims
+            </button>
+            <button style={dangerBtn} onClick={fullReset}>
+              💥 Full reset
+            </button>
           </div>
         </div>
       )}

@@ -106,6 +106,10 @@ export interface PetGame {
   restart: () => void;
   /** Rename the pet (trimmed, 1–24 chars — no-op otherwise). */
   rename: (name: string) => void;
+  /** A friend petted this pet in an online room: small happiness bump, no care points (not farmable). */
+  receiveSocialPet: () => void;
+  /** Applies an online battle outcome: winner gains happiness + care points, loser sheds a little happiness. */
+  applyBattleResult: (won: boolean) => void;
   /** Claim a claimable daily/weekly quest — awards its care-point reward. */
   claimQuest: (code: PetQuestCode) => void;
   claimableQuestCount: number;
@@ -543,6 +547,29 @@ export function usePetGame(userId: string | null): PetGame {
     setSave((prev) => ({ ...prev, name: trimmed }));
   }, []);
 
+  const receiveSocialPet = useCallback(() => {
+    setSave((prev) => {
+      if (!prev.isAlive || prev.isSleeping) return prev;
+      return { ...prev, happiness: clampStat(prev.happiness + 2), lastInteraction: new Date().toISOString() };
+    });
+  }, []);
+
+  const applyBattleResult = useCallback((won: boolean) => {
+    setSave((prev) => {
+      if (!prev.isAlive) return prev;
+      const nowIso = new Date().toISOString();
+      if (won) {
+        return {
+          ...prev,
+          happiness: clampStat(prev.happiness + 10),
+          carePoints: clampCarePointsForProgress(prev, prev.carePoints + 6, rules),
+          lastInteraction: nowIso,
+        };
+      }
+      return { ...prev, happiness: clampStat(prev.happiness - 3), lastInteraction: nowIso };
+    });
+  }, []);
+
   // ── Dev-only helpers (reachable only from the DEV-gated admin panel) ──────
   const debugApply = useCallback((patch: Partial<PetSaveData>) => {
     setSave((prev) => ({ ...prev, ...patch, lastInteraction: new Date().toISOString() }));
@@ -659,6 +686,8 @@ export function usePetGame(userId: string | null): PetGame {
     toggleSleep,
     restart,
     rename,
+    receiveSocialPet,
+    applyBattleResult,
     claimQuest,
     claimableQuestCount: countClaimableQuests(save),
     achievements,

@@ -24,6 +24,10 @@ import { SideDock } from "./SideDock";
 import { useRibbonPrefs } from "./useRibbonPrefs";
 import { useConsumables } from "./useConsumables";
 import { useGamePrefs } from "./useGamePrefs";
+import { useGroups } from "./useGroups";
+import { useRoom } from "../online/useRoom";
+import { RemotePets } from "../online/RemotePets";
+import { RoomBar } from "../online/RoomBar";
 import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
@@ -295,6 +299,59 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setTimeout(() => setHappyPulse(false), 700);
     setTimeout(() => setFxTrigger((t) => (t === "happy" ? null : t)), 900);
   }, []);
+
+  // ── Online: groups + realtime room ──────────────────────────────────────
+  const groupsApi = useGroups(auth.userId);
+  const onSocialPet = useCallback(
+    (fromName: string) => {
+      game.receiveSocialPet();
+      pulseHappy();
+      sfx(Sounds.playSqueak);
+      dbg(`petted by ${fromName} 🤗`);
+    },
+    [game, pulseHappy, sfx, dbg],
+  );
+  const onBattleResolved = useCallback(
+    (won: boolean, opponentName: string) => {
+      expectDeltaRef.current = true;
+      game.applyBattleResult(won);
+      if (won) {
+        pulseHappy();
+        sfx(Sounds.playEvolution);
+      } else {
+        sfx(Sounds.playHungry);
+      }
+      dbg(won ? `won battle vs ${opponentName} 🏆` : `lost battle vs ${opponentName}`);
+    },
+    [game, pulseHappy, sfx, dbg],
+  );
+  const room = useRoom({
+    userId: auth.userId,
+    displayName: auth.displayName || auth.email?.split("@")[0] || "Player",
+    save,
+    isEgg: game.isEgg,
+    onSocialPet,
+    onBattleResolved,
+  });
+
+  // Publish my pet's position (normalized to screen fraction so every
+  // member's monitor maps it proportionally) while in a room.
+  useEffect(() => {
+    if (!room.activeGroup) return;
+    const id = setInterval(() => {
+      room.updateMyPosition(
+        (movement.x.get() + PET_SIZE / 2) / window.innerWidth,
+        (movement.y.get() + PET_SIZE / 2) / window.innerHeight,
+      );
+    }, 150);
+    return () => clearInterval(id);
+  }, [room, movement]);
+
+  // Product rule: eggs can't be online. If the pet regresses to an egg
+  // (restart) while in a room, drop the connection.
+  useEffect(() => {
+    if (game.isEgg && room.activeGroup) room.leaveRoom();
+  }, [game.isEgg, room]);
 
   // ── Feed: click a piece to grab it, it follows the cursor, click again
   // to throw ───────────────────────────────────────────────────────────────
@@ -877,7 +934,20 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onRename={game.rename}
         onSignOut={auth.signOut}
         onQuit={() => window.overlay.quit()}
+        groupsApi={groupsApi}
+        activeRoomGroupId={room.activeGroup?.id ?? null}
+        canGoOnline={!game.isEgg && save.isAlive}
+        onEnterRoom={(g) => {
+          room.join(g);
+          setStatsOpen(false);
+          dbg(`joined room ${g.name}`);
+        }}
+        onLeaveRoom={room.leaveRoom}
       />
+
+      {/* Online room layer: friends' pets + the room bar. */}
+      <RemotePets room={room} />
+      <RoomBar room={room} />
 
       {/* Food — always mounted, positioned purely via foodX/foodY motion
           values driven by the window mousemove listener above (see grabFood
@@ -1036,6 +1106,42 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             animated ZZZ particles, no need for a second static icon. */}
         {needsAttention && (
           <div style={{ position: "absolute", top: -18, right: 8, fontSize: 18, pointerEvents: "none" }}>❗</div>
+        )}
+
+        {/* My own room chat bubble + emote, mirroring what friends see. */}
+        {auth.userId && room.activeGroup && room.bubbles[auth.userId] && Date.now() - room.bubbles[auth.userId]!.at < 6000 && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: PET_SIZE + 6,
+              left: "50%",
+              transform: "translateX(-50%)",
+              maxWidth: 220,
+              fontSize: 12,
+              padding: "6px 10px",
+              borderRadius: 12,
+              background: "rgba(255,255,255,0.95)",
+              color: "#1f2937",
+              pointerEvents: "none",
+              boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {room.bubbles[auth.userId]!.text}
+          </div>
+        )}
+        {auth.userId && room.activeGroup && room.emotes[auth.userId] && (
+          <motion.div
+            key={room.emotes[auth.userId]!.emoji + room.emotes[auth.userId]!.at}
+            initial={{ opacity: 0, y: 0, scale: 0.5 }}
+            animate={{ opacity: [0, 1, 1, 0], y: -40, scale: 1.4 }}
+            transition={{ duration: 2 }}
+            style={{ position: "absolute", top: -14, left: "50%", fontSize: 26, pointerEvents: "none" }}
+          >
+            {room.emotes[auth.userId]!.emoji}
+          </motion.div>
         )}
 
         {/* Floating stat-delta popups (+40 🍖 / -5 ❤️ …) — rendered on the

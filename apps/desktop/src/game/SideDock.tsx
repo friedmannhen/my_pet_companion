@@ -38,6 +38,7 @@ import type { AuthState } from "../supabase/useAuth";
 import type { SessionLease } from "../session/useSessionLease";
 import type { RibbonSide } from "./useRibbonPrefs";
 import { useLeaderboard } from "./useLeaderboard";
+import type { GroupInfo, UseGroups } from "./useGroups";
 import "./hud.css";
 
 const rules = DEFAULT_PET_RULES;
@@ -277,6 +278,13 @@ export interface SideDockProps {
   onRename: (name: string) => void;
   onSignOut: () => void;
   onQuit: () => void;
+  groupsApi: UseGroups;
+  /** Group id of the room we're currently in (null = offline). */
+  activeRoomGroupId: string | null;
+  /** False while the pet is still an egg — online play is locked. */
+  canGoOnline: boolean;
+  onEnterRoom: (group: GroupInfo) => void;
+  onLeaveRoom: () => void;
 }
 
 export function SideDock({
@@ -304,9 +312,17 @@ export function SideDock({
   onRename,
   onSignOut,
   onQuit,
+  groupsApi,
+  activeRoomGroupId,
+  canGoOnline,
+  onEnterRoom,
+  onLeaveRoom,
 }: SideDockProps) {
   const { save } = game;
-  const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "settings">("home");
+  const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "groups" | "settings">("home");
+  const [groupNameDraft, setGroupNameDraft] = useState("");
+  const [joinCodeDraft, setJoinCodeDraft] = useState("");
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState(save.name);
   const [renameSaved, setRenameSaved] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(auth.displayName ?? "");
@@ -318,11 +334,11 @@ export function SideDock({
     void auth.updateDisplayName(trimmed).then(() => setDisplayNameSaved(true));
   };
 
-  // The rename input needs real OS keyboard focus (the overlay window is
-  // non-focusable by default — see main.ts). Granted only while the
-  // settings view is actually open, same bounded-interaction pattern as
-  // wash-scrub and the auth card.
-  const settingsActive = open && view === "settings";
+  // The rename/group text inputs need real OS keyboard focus (the overlay
+  // window is non-focusable by default — see main.ts). Granted only while a
+  // typing-capable view is actually open, same bounded-interaction pattern
+  // as wash-scrub and the auth card.
+  const settingsActive = open && (view === "settings" || view === "groups");
   useEffect(() => {
     if (!settingsActive) return;
     window.overlay.setFocusable(true);
@@ -518,6 +534,7 @@ export function SideDock({
                 { key: "quests", icon: "📜", label: "Quests", badge: game.claimableQuestCount },
                 { key: "awards", icon: "🏆", label: "Achievements", badge: game.achievements.claimableCount },
                 { key: "ranks", icon: "🌍", label: "Leaderboard & hall of fame", badge: 0 },
+                { key: "groups", icon: "👥", label: "Groups & online rooms", badge: 0 },
               ] as const
             ).map((nav) => (
               <button
@@ -829,6 +846,189 @@ export function SideDock({
                 );
               })}
             </section>
+          </div>
+        ) : view === "groups" ? (
+          <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
+            {!canGoOnline && (
+              <div
+                style={{
+                  padding: 10,
+                  borderRadius: 8,
+                  background: "rgba(251,191,36,0.15)",
+                  color: "#fde68a",
+                  marginBottom: 14,
+                  fontSize: 12,
+                }}
+              >
+                🥚 Only hatched pets can go online — warm your egg first!
+              </div>
+            )}
+
+            <section style={{ marginBottom: 16 }}>
+              <h2 style={sectionTitle}>My groups</h2>
+              {groupsApi.error && (
+                <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>⚠️ {groupsApi.error}</div>
+              )}
+              {groupsApi.groups.map((g) => {
+                const inThisRoom = activeRoomGroupId === g.id;
+                return (
+                  <div
+                    key={g.id}
+                    style={{
+                      borderRadius: 10,
+                      background: inThisRoom ? "rgba(52,211,153,0.12)" : "rgba(255,255,255,0.05)",
+                      border: inThisRoom ? "1px solid rgba(52,211,153,0.4)" : "1px solid transparent",
+                      padding: "8px 10px",
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <strong style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {g.groupType === "global" ? "🌍" : "👥"} {g.name}
+                      </strong>
+                      {inThisRoom ? (
+                        <button style={{ ...chipStyle, background: "rgba(248,113,113,0.35)", flexShrink: 0 }} onClick={onLeaveRoom}>
+                          Leave room
+                        </button>
+                      ) : (
+                        <button
+                          style={{ ...chipStyle, background: "rgba(52,211,153,0.35)", flexShrink: 0, opacity: canGoOnline ? 1 : 0.4 }}
+                          disabled={!canGoOnline}
+                          title={canGoOnline ? "Go online in this group's room" : "Hatch your egg first"}
+                          onClick={() => onEnterRoom(g)}
+                        >
+                          🌐 Enter room
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 10, opacity: 0.75 }}>
+                      {g.inviteCode && g.groupType !== "global" && (
+                        <>
+                          <span>
+                            Invite code: <strong style={{ letterSpacing: 1 }}>{g.inviteCode}</strong>
+                          </span>
+                          <button
+                            style={{ ...chipStyle, padding: "1px 6px", fontSize: 10 }}
+                            onClick={() => {
+                              void navigator.clipboard.writeText(g.inviteCode!);
+                              setCopiedCode(g.id);
+                              setTimeout(() => setCopiedCode((c) => (c === g.id ? null : c)), 1500);
+                            }}
+                          >
+                            {copiedCode === g.id ? "✓ copied" : "copy"}
+                          </button>
+                        </>
+                      )}
+                      {g.groupType === "global" && <span>Everyone is here automatically.</span>}
+                      <span style={{ marginLeft: "auto", opacity: 0.6 }}>{g.role}</span>
+                    </div>
+                  </div>
+                );
+              })}
+              {groupsApi.groups.length === 0 && !groupsApi.loading && (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>No groups yet — create one below.</div>
+              )}
+            </section>
+
+            <section style={{ marginBottom: 16 }}>
+              <h2 style={sectionTitle}>Create a group</h2>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  value={groupNameDraft}
+                  onChange={(e) => setGroupNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && groupNameDraft.trim().length >= 2) {
+                      void groupsApi.create(groupNameDraft).then(() => setGroupNameDraft(""));
+                    }
+                  }}
+                  maxLength={40}
+                  placeholder="Group name"
+                  style={{
+                    flex: 1,
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 7,
+                    padding: "6px 8px",
+                    fontSize: 12,
+                    background: "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  style={{ ...chipStyle, opacity: groupNameDraft.trim().length >= 2 ? 1 : 0.5 }}
+                  disabled={groupNameDraft.trim().length < 2}
+                  onClick={() => void groupsApi.create(groupNameDraft).then(() => setGroupNameDraft(""))}
+                >
+                  Create
+                </button>
+              </div>
+              <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                You get an invite code to share with friends.
+              </div>
+            </section>
+
+            <section style={{ marginBottom: 16 }}>
+              <h2 style={sectionTitle}>Join with a code</h2>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  value={joinCodeDraft}
+                  onChange={(e) => setJoinCodeDraft(e.target.value.toUpperCase())}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && joinCodeDraft.trim().length >= 4) {
+                      void groupsApi.join(joinCodeDraft).then(() => setJoinCodeDraft(""));
+                    }
+                  }}
+                  maxLength={8}
+                  placeholder="ABC123"
+                  style={{
+                    flex: 1,
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 7,
+                    padding: "6px 8px",
+                    fontSize: 12,
+                    letterSpacing: 2,
+                    background: "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  style={{ ...chipStyle, opacity: joinCodeDraft.trim().length >= 4 ? 1 : 0.5 }}
+                  disabled={joinCodeDraft.trim().length < 4}
+                  onClick={() => void groupsApi.join(joinCodeDraft).then(() => setJoinCodeDraft(""))}
+                >
+                  Join
+                </button>
+              </div>
+            </section>
+
+            <section style={{ marginBottom: 8 }}>
+              <h2 style={sectionTitle}>Leave a group</h2>
+              {groupsApi.groups
+                .filter((g) => g.groupType !== "global")
+                .map((g) => (
+                  <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "3px 0", fontSize: 12 }}>
+                    <span style={{ opacity: 0.75 }}>{g.name}</span>
+                    <button
+                      style={{ ...chipStyle, padding: "2px 8px", fontSize: 10, background: "rgba(248,113,113,0.25)" }}
+                      onClick={() => {
+                        if (activeRoomGroupId === g.id) onLeaveRoom();
+                        void groupsApi.leave(g.id);
+                      }}
+                    >
+                      leave
+                    </button>
+                  </div>
+                ))}
+              {groupsApi.groups.filter((g) => g.groupType !== "global").length === 0 && (
+                <div style={{ fontSize: 11, opacity: 0.5 }}>Nothing to leave.</div>
+              )}
+            </section>
+
+            <div style={{ fontSize: 10, opacity: 0.45 }}>
+              In a room: your pet appears on your friends&apos; desktops (and theirs on
+              yours), with chat, emotes, petting and ⚔️ battles.
+            </div>
           </div>
         ) : view === "ranks" ? (
           <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>

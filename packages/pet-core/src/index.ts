@@ -11,3 +11,4 @@ export * from "./save";
 export * from "./decay";
 export * from "./quests";
 export * from "./achievements";
+export * from "./battle";

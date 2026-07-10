@@ -112,8 +112,47 @@ function createOverlay(): void {
   });
 }
 
+/**
+ * Re-fit the overlay to the CURRENT primary work area. The window is created
+ * once at launch with that moment's dimensions — if the user then switches
+ * resolution (2K → 1080p), changes display scaling, or swaps the primary
+ * monitor, the stale window keeps its old size and everything docked to its
+ * far edge (the SideDock ribbon) ends up physically offscreen. Resizing here
+ * also fires the renderer's `resize` listeners, which already clamp the
+ * ribbon's saved height and the pet's position back into view.
+ */
+function fitOverlayToWorkArea(): void {
+  if (!overlay || overlay.isDestroyed()) return;
+  const { workArea } = screen.getPrimaryDisplay();
+  const target = {
+    x: workArea.x,
+    y: workArea.y,
+    width: workArea.width,
+    // Same -1 as at creation (DWM borderless-fullscreen heuristic).
+    height: workArea.height - 1,
+  };
+  const current = overlay.getBounds();
+  if (
+    current.x === target.x &&
+    current.y === target.y &&
+    current.width === target.width &&
+    current.height === target.height
+  ) {
+    return;
+  }
+  // On Windows, `resizable: false` can also block PROGRAMMATIC size changes
+  // via setBounds (long-standing Electron quirk) — lift it for the call.
+  overlay.setResizable(true);
+  overlay.setBounds(target);
+  overlay.setResizable(false);
+}
+
 app.whenReady().then(() => {
   createOverlay();
+
+  screen.on("display-metrics-changed", fitOverlayToWorkArea);
+  screen.on("display-added", fitOverlayToWorkArea);
+  screen.on("display-removed", fitOverlayToWorkArea);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createOverlay();

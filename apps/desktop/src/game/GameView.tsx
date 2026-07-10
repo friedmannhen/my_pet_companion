@@ -100,6 +100,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const sfx = useCallback((play: () => void) => {
     if (soundRef.current) play();
   }, []);
+
+  // DEV-only on-screen event log (renderer console isn't visible without
+  // --enable-logging, so surface the last few gesture/sequence events right
+  // in the overlay — this is how we diagnose "the grab did nothing").
+  const [debugLines, setDebugLines] = useState<string[]>([]);
+  const dbg = useCallback((msg: string) => {
+    if (!import.meta.env.DEV) return;
+    console.log("[game]", msg);
+    const t = new Date();
+    const stamp = `${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
+    setDebugLines((prev) => [...prev.slice(-3), `${stamp} ${msg}`]);
+  }, []);
   const [statsOpen, setStatsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [feedPhase, setFeedPhase] = useState<"idle" | "held" | "released" | "eating">("idle");
@@ -314,8 +326,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const grabFood = useCallback(
     (e: React.MouseEvent, slot: number) => {
-      if (!canFeed) return;
-      if (!consumables.takeFood(slot)) return;
+      if (!canFeed) {
+        dbg(`feed grab blocked (busy=${petBusy} sleep=${save.isSleeping} egg=${game.isEgg})`);
+        return;
+      }
+      if (!consumables.takeFood(slot)) {
+        dbg(`feed grab: slot ${slot} not ready`);
+        return;
+      }
+      dbg(`feed grabbed slot ${slot}`);
       setStatsOpen(false);
       setMenuOpen(false);
       setClickableOverride(true);
@@ -354,40 +373,50 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       window.addEventListener("mousemove", onMove);
       window.addEventListener("click", onThrowClick);
     },
-    [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity],
+    [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity, dbg, petBusy, save.isSleeping, game.isEgg],
   );
 
   const throwFood = useCallback(async () => {
     setClickableOverride(false);
     setFeedPhase("released");
-    const GLIDE = 0.16;
-    const { vx, vy } = foodVelRef.current;
-    const landX = Math.max(40, Math.min(window.innerWidth - 40, foodX.get() + vx * GLIDE));
-    const landY = Math.max(80, Math.min(window.innerHeight - 100, foodY.get() + vy * GLIDE));
+    dbg("feed thrown");
+    // try/finally: NOTHING may leave feedPhase stuck ≠ idle — petBusy would
+    // lock every later grab/menu forever (that exact deadlock is what made
+    // "worked once, then nothing works" happen with the ball).
+    try {
+      const GLIDE = 0.16;
+      const { vx, vy } = foodVelRef.current;
+      const landX = Math.max(40, Math.min(window.innerWidth - 40, foodX.get() + vx * GLIDE));
+      const landY = Math.max(80, Math.min(window.innerHeight - 100, foodY.get() + vy * GLIDE));
 
-    await Promise.all([
-      animate(foodX, landX, { type: "spring", stiffness: 100, damping: 20 }),
-      animate(foodY, landY, { type: "spring", stiffness: 100, damping: 20 }),
-    ]);
-    await animate(foodY, landY - 14, { duration: 0.12, ease: "easeOut" });
-    await animate(foodY, landY, { duration: 0.1, ease: "easeIn" });
+      await Promise.all([
+        animate(foodX, landX, { type: "spring", stiffness: 100, damping: 20 }),
+        animate(foodY, landY, { type: "spring", stiffness: 100, damping: 20 }),
+      ]);
+      await animate(foodY, landY - 14, { duration: 0.12, ease: "easeOut" });
+      await animate(foodY, landY, { duration: 0.1, ease: "easeIn" });
 
-    await movement.walkTo(landX - 44, landY - 88);
+      await movement.walkTo(landX - 44, landY - 88);
 
-    setFeedPhase("eating");
-    const wasOverfed = !game.isEgg && game.save.hunger >= 100;
-    setFxTrigger(wasOverfed ? "overfed" : "eat");
-    sfx(Sounds.playNom);
-    expectDeltaRef.current = true;
-    game.feed();
-    await new Promise((r) => setTimeout(r, 450));
-    await animate(foodScale, 0, { duration: 0.3, ease: "easeIn" });
-    foodOpacity.set(0);
-    foodScale.set(1);
-
-    setFxTrigger(null);
-    setFeedPhase("idle");
-  }, [foodX, foodY, foodScale, foodOpacity, movement, game, sfx]);
+      setFeedPhase("eating");
+      const wasOverfed = !game.isEgg && game.save.hunger >= 100;
+      setFxTrigger(wasOverfed ? "overfed" : "eat");
+      sfx(Sounds.playNom);
+      expectDeltaRef.current = true;
+      game.feed();
+      dbg("feed eaten");
+      await new Promise((r) => setTimeout(r, 450));
+      await animate(foodScale, 0, { duration: 0.3, ease: "easeIn" });
+    } catch (err) {
+      console.error("[feed] sequence failed:", err);
+      dbg(`feed FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      foodOpacity.set(0);
+      foodScale.set(1);
+      setFxTrigger(null);
+      setFeedPhase("idle");
+    }
+  }, [foodX, foodY, foodScale, foodOpacity, movement, game, sfx, dbg]);
   throwFoodRef.current = () => void throwFood();
 
   // ── Ball: grab from the SideDock, throw, pet fetches & throws back ──────
@@ -405,8 +434,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const grabBall = useCallback(
     (e: React.MouseEvent) => {
-      if (!canPlayBall) return;
-      if (!consumables.takeBall()) return;
+      if (!canPlayBall) {
+        dbg(`ball grab blocked (busy=${petBusy} sleep=${save.isSleeping} egg=${game.isEgg})`);
+        return;
+      }
+      if (!consumables.takeBall()) {
+        dbg("ball grab: ball not in slot");
+        return;
+      }
+      dbg("ball grabbed");
       setStatsOpen(false);
       setMenuOpen(false);
       setClickableOverride(true);
@@ -445,56 +481,66 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       window.addEventListener("mousemove", onMove);
       window.addEventListener("click", onThrowClick);
     },
-    [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity],
+    [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity, dbg, petBusy, save.isSleeping, game.isEgg],
   );
 
   const runBallFetch = useCallback(async () => {
     setClickableOverride(false);
     setBallPhase("playing");
-    const GLIDE = 0.16;
-    const { vx, vy } = ballVelRef.current;
-    const landX = Math.max(40, Math.min(window.innerWidth - 40, ballX.get() + vx * GLIDE));
-    const landY = Math.max(80, Math.min(window.innerHeight - 100, ballY.get() + vy * GLIDE));
+    dbg("ball thrown");
+    // try/finally: the ball MUST return to its slot and ballPhase MUST reach
+    // idle no matter what fails mid-sequence — a stuck "playing" is exactly
+    // the "Out playing… forever, everything dead" lockup reported live.
+    try {
+      const GLIDE = 0.16;
+      const { vx, vy } = ballVelRef.current;
+      const landX = Math.max(40, Math.min(window.innerWidth - 40, ballX.get() + vx * GLIDE));
+      const landY = Math.max(80, Math.min(window.innerHeight - 100, ballY.get() + vy * GLIDE));
 
-    // Flight: glide to the landing spot with spin.
-    await Promise.all([
-      animate(ballX, landX, { type: "spring", stiffness: 100, damping: 20 }),
-      animate(ballY, landY, { type: "spring", stiffness: 100, damping: 20 }),
-      animate(ballRotate, ballRotate.get() + 420, { duration: 0.6, ease: "easeOut" }),
-    ]);
-    // Gravity bounce (2 diminishing hops).
-    await animate(ballY, landY - 24, { duration: 0.16, ease: "easeOut" });
-    await animate(ballY, landY, { duration: 0.13, ease: "easeIn" });
-    await animate(ballY, landY - 10, { duration: 0.1, ease: "easeOut" });
-    await animate(ballY, landY, { duration: 0.09, ease: "easeIn" });
+      // Flight: glide to the landing spot with spin.
+      await Promise.all([
+        animate(ballX, landX, { type: "spring", stiffness: 100, damping: 20 }),
+        animate(ballY, landY, { type: "spring", stiffness: 100, damping: 20 }),
+        animate(ballRotate, ballRotate.get() + 420, { duration: 0.6, ease: "easeOut" }),
+      ]);
+      // Gravity bounce (2 diminishing hops).
+      await animate(ballY, landY - 24, { duration: 0.16, ease: "easeOut" });
+      await animate(ballY, landY, { duration: 0.13, ease: "easeIn" });
+      await animate(ballY, landY - 10, { duration: 0.1, ease: "easeOut" });
+      await animate(ballY, landY, { duration: 0.09, ease: "easeIn" });
 
-    // Pet runs to the ball.
-    await movement.walkTo(landX - 44, landY - 88);
+      // Pet runs to the ball.
+      await movement.walkTo(landX - 44, landY - 88);
 
-    // Grab: ball snaps to the pet with a quick bounce.
-    expectDeltaRef.current = true;
-    game.throwBall();
-    pulseHappy();
-    ballX.set(movement.x.get() + 40);
-    ballY.set(movement.y.get() + 15);
-    await animate(ballScale, 1.5, { duration: 0.08 });
-    await animate(ballScale, 1, { duration: 0.1 });
+      // Grab: ball snaps to the pet with a quick bounce.
+      expectDeltaRef.current = true;
+      game.throwBall();
+      pulseHappy();
+      dbg("ball fetched");
+      ballX.set(movement.x.get() + 40);
+      ballY.set(movement.y.get() + 15);
+      await animate(ballScale, 1.5, { duration: 0.08 });
+      await animate(ballScale, 1, { duration: 0.1 });
 
-    // Throw back at the screen: grows toward center then fades.
-    await Promise.all([
-      animate(ballX, window.innerWidth / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
-      animate(ballY, window.innerHeight / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
-      animate(ballScale, 16, { duration: 0.65, ease: THROW_EASE }),
-      animate(ballOpacity, 0, { duration: 0.65, ease: THROW_EASE }),
-    ]);
-
-    ballOpacity.set(0);
-    ballScale.set(0);
-    ballX.set(-200);
-    ballY.set(-200);
-    consumables.returnBall();
-    setBallPhase("idle");
-  }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity]);
+      // Throw back at the screen: grows toward center then fades.
+      await Promise.all([
+        animate(ballX, window.innerWidth / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
+        animate(ballY, window.innerHeight / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
+        animate(ballScale, 16, { duration: 0.65, ease: THROW_EASE }),
+        animate(ballOpacity, 0, { duration: 0.65, ease: THROW_EASE }),
+      ]);
+    } catch (err) {
+      console.error("[ball] sequence failed:", err);
+      dbg(`ball FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      ballOpacity.set(0);
+      ballScale.set(0);
+      ballX.set(-200);
+      ballY.set(-200);
+      consumables.returnBall();
+      setBallPhase("idle");
+    }
+  }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity, dbg]);
   runBallFetchRef.current = () => void runBallFetch();
 
   // ── Wash: hold sponge + scrub (entered from the SideDock's sponge) ──────
@@ -781,6 +827,26 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           }}
         >
           {clickable ? "interactive (over pet)" : "click-through"}
+        </div>
+      )}
+      {import.meta.env.DEV && debugLines.length > 0 && (
+        <div
+          style={{
+            position: "fixed",
+            top: 38,
+            right: 8,
+            padding: "4px 10px",
+            borderRadius: 8,
+            fontSize: 10,
+            fontFamily: "Consolas, monospace",
+            color: "#a7f3d0",
+            background: "rgba(30,30,30,0.75)",
+            pointerEvents: "none",
+            textAlign: "right",
+            whiteSpace: "pre",
+          }}
+        >
+          {debugLines.join("\n")}
         </div>
       )}
 

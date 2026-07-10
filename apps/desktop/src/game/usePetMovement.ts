@@ -170,16 +170,38 @@ export function usePetMovement({ active, initial }: UsePetMovementOptions): UseP
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
+      // Callers pass raw landing points (e.g. thrown-food position minus an
+      // offset) that can fall outside the walkable area — clamp so the loop
+      // can actually arrive.
+      const target = clampPos(targetX, targetY);
       setIsMoving(true);
       return new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(watchdog);
+          setIsMoving(false);
+          if (activeRef.current) timerRef.current = setTimeout(() => scheduleNext(), 650);
+          resolve();
+        };
+        // Watchdog: a caller must NEVER await forever — a stuck walk would
+        // freeze the whole feed/ball sequence and (via petBusy) deadlock all
+        // later interactions. Any screen crossing takes well under 6s at
+        // ~10px/frame; past that, teleport to the target and move on.
+        const watchdog = setTimeout(() => {
+          x.set(target.x);
+          y.set(target.y);
+          console.warn("[walkTo] watchdog fired — teleported to target");
+          finish();
+        }, 6000);
         const step = () => {
-          const dx = targetX - x.get();
-          const dy = targetY - y.get();
+          if (done) return;
+          const dx = target.x - x.get();
+          const dy = target.y - y.get();
           const dist = Math.sqrt(dx * dx + dy * dy);
           if (dist < 28) {
-            setIsMoving(false);
-            if (activeRef.current) timerRef.current = setTimeout(() => scheduleNext(), 650);
-            resolve();
+            finish();
             return;
           }
           const nf: "left" | "right" = dx > 0 ? "right" : "left";

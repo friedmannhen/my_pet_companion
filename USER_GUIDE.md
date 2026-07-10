@@ -116,7 +116,7 @@ game's drawer.
 - **Drag the tab up/down** to set its height on the edge (vertical only —
   which edge it lives on is a Settings choice). Height is remembered
   between launches.
-- The drawer's **home view** shows the Kitchen & toy box (food pile,
+- The drawer's **🏠 home view** shows the Kitchen & toy box (food pile,
   ball, sponge), all stat bars with their icons (🍖/🔥, 🧼, ❤️) plus a
   **gold ⭐ care-points bar** tracking progress to the next evolution,
   age/stage info, and lifetime care history. It's part of the pet overlay
@@ -128,7 +128,42 @@ game's drawer.
   **Sign out**, and **Quit**. A red sync-error message appears here too if
   something's wrong with cloud sync.
 - A colored dot on the tab shows cloud-sync status at a glance (green =
-  synced, yellow = syncing, gray = offline, red = error).
+  synced, yellow = syncing, gray = offline, red = error). A red number
+  badge on the tab means you have unclaimed quest/achievement rewards.
+
+## Quests (📜 in the drawer header)
+
+- **Daily quests** (reset every day at the daily cutoff; unclaimed rewards
+  are lost at reset):
+  - **Balanced Care** — 3 qualified feeds + 3 washes + 3 pets (same-type
+    actions must be at least 1 hour apart to count).
+  - **Focus Session** — keep the pet awake with ALL stats at 70+ for 120
+    minutes total.
+  - **Clean Run** — no overfeeds from midnight until the daily cutoff.
+- **Weekly quests** — all designed around **any 4 good days out of the
+  week**, so skipping a weekend never locks you out:
+  - **Careful Feeder** — feed on 4 different days with zero overfeeds all
+    week.
+  - **Play Week** — 2+ ball throws on 4 different days.
+  - **Hunger / Cleanliness / Happiness Guardian** — keep that stat at 50+
+    for 60 awake minutes on 4 different days.
+- Completed quests turn green with a **Claim** button — claiming awards
+  bonus ⭐ care points on the spot.
+
+## Achievements (🏆 in the drawer header)
+
+Long-term lifetime goals (total feeds, washes, pets, ball throws, hatches,
+evolutions, quests completed…). Reaching a tier makes it **claimable**;
+claiming applies a **permanent % bonus** to the care points earned by that
+category of action (feeding / washing / play) — stack them up over time.
+
+## Leaderboard & hall of fame (🌍 in the drawer header)
+
+- **Leaderboard** — the top pets across all players by care points (your
+  row is highlighted). Updates when you open the view or hit ↻ Refresh.
+- **Hall of fame** — permanent, first-come-only records (e.g. the first
+  pet ever to reach its final form). Once claimed, a record keeps its
+  owner's name forever.
 
 ## Dev-only: admin panel
 
@@ -145,8 +180,8 @@ Visible only in development builds (never in a packaged release), a small
 
 - Only the cat is playable (phoenix and the other four pet types have no
   sprite art yet — see PET_GAME_TRANSFORMATION_PLAN.md §14).
-- No quests, achievements, or leaderboards in the stats window yet.
 - No Google/Microsoft sign-in — email/password only.
-- No friends, groups, or multiplayer of any kind yet (Phase 2 session
-  leases exist so only one device can be "live" at a time, but there's
-  nobody else to interact with yet).
+- No friend requests or private groups yet — the leaderboard/hall of fame
+  run on the automatic Global group everyone joins at signup. Friend
+  circles, org groups, and richer multiplayer come later.
+- Sounds are not ported yet (the settings view reserves a spot).

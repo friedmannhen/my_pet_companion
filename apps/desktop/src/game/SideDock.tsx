@@ -16,17 +16,33 @@
 // item — grab straight from the pile and throw.
 import { useEffect, useRef, useState } from "react";
 import { motion, useMotionValue, useTransform } from "framer-motion";
-import { DEFAULT_PET_RULES } from "@pet/core";
+import {
+  DAILY_QUEST_CODES,
+  DEFAULT_PET_RULES,
+  GUARDIAN_MINUTES_PER_DAY,
+  PET_ACHIEVEMENT_CODES,
+  PET_ACHIEVEMENT_DEFINITIONS,
+  PET_QUEST_DEFINITIONS,
+  WEEKLY_QUEST_CODES,
+  WEEKLY_QUEST_TARGET_DAYS,
+  countQualifiedDays,
+  describeReward,
+  type PetQuestCode,
+  type PetSaveData,
+  type QuestClaimState,
+} from "@pet/core";
 import houseIcon from "../assets/widget/house.png";
 import settingsIcon from "../assets/widget/widget_settings.png";
 import type { PetGame } from "./usePetGame";
 import type { AuthState } from "../supabase/useAuth";
 import type { SessionLease } from "../session/useSessionLease";
 import type { RibbonSide } from "./useRibbonPrefs";
+import { useLeaderboard } from "./useLeaderboard";
 import "./hud.css";
 
 const rules = DEFAULT_PET_RULES;
 const STAGE_NAMES = ["Egg", "Baby", "Adult", "Final"];
+const STAGE_EMOJI = ["🥚", "🐣", "🐈", "😼"];
 export const DRAWER_WIDTH = 340;
 const TAB_SIZE = 46;
 const FILLET = 12;
@@ -119,6 +135,123 @@ function fmtEta(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+function guardianDaysText(map: Record<string, number>): string {
+  return `${countQualifiedDays(map, GUARDIAN_MINUTES_PER_DAY)}/${WEEKLY_QUEST_TARGET_DAYS} days (${GUARDIAN_MINUTES_PER_DAY} good min each)`;
+}
+
+function questProgressText(save: PetSaveData, code: PetQuestCode): string {
+  const q = save.quests;
+  if (!q) return "";
+  switch (code) {
+    case "balancedCare":
+      return `🍖 ${q.daily.feedQualifiedCount}/3 · 🧼 ${q.daily.washQualifiedCount}/3 · 🤗 ${q.daily.petQualifiedCount}/3`;
+    case "focusSession":
+      return `${Math.floor(q.daily.focusEligibleMinutes)}/${rules.quest.focusMinutesRequired} focused minutes`;
+    case "cleanRun":
+      return q.daily.hadOverfeedToday
+        ? "Failed today — there was an overfeed"
+        : q.daily.cleanRunWindowClosed
+          ? "Today's window closed"
+          : "No overfeeds so far — keep it up";
+    case "noOverfeedWeek":
+      return q.weekly.hadOverfeedWeek
+        ? "Failed this week — there was an overfeed"
+        : `${Object.keys(q.weekly.feedDaysByDayKey).length}/${WEEKLY_QUEST_TARGET_DAYS} feed days`;
+    case "dailyPlayWeek":
+      return `${countQualifiedDays(q.weekly.playCountByDayKey, 2)}/${WEEKLY_QUEST_TARGET_DAYS} play days (2+ throws each)`;
+    case "hungerGuardian":
+      return guardianDaysText(q.weekly.hungerOkMinutesByDayKey);
+    case "cleanlinessGuardian":
+      return guardianDaysText(q.weekly.cleanlinessOkMinutesByDayKey);
+    case "happinessGuardian":
+      return guardianDaysText(q.weekly.happinessOkMinutesByDayKey);
+  }
+}
+
+function QuestCard({
+  code,
+  state,
+  progressText,
+  onClaim,
+}: {
+  code: PetQuestCode;
+  state: QuestClaimState | undefined;
+  progressText: string;
+  onClaim: () => void;
+}) {
+  const def = PET_QUEST_DEFINITIONS[code];
+  const status = state?.status ?? "in_progress";
+  return (
+    <div
+      style={{
+        borderRadius: 10,
+        background: status === "claimable" ? "rgba(52,211,153,0.12)" : "rgba(255,255,255,0.05)",
+        border: status === "claimable" ? "1px solid rgba(52,211,153,0.4)" : "1px solid transparent",
+        padding: "8px 10px",
+        marginBottom: 8,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <strong style={{ fontSize: 12 }}>{def.title}</strong>
+        {status === "claimable" ? (
+          <button
+            onClick={onClaim}
+            style={{
+              cursor: "pointer",
+              border: "none",
+              borderRadius: 7,
+              padding: "4px 10px",
+              fontSize: 11,
+              fontWeight: 700,
+              background: "rgba(52,211,153,0.85)",
+              color: "#06281c",
+              flexShrink: 0,
+            }}
+          >
+            Claim +{def.rewardPoints} ⭐
+          </button>
+        ) : status === "claimed" ? (
+          <span style={{ fontSize: 11, color: "#34d399", flexShrink: 0 }}>✓ +{state?.awardedPoints ?? def.rewardPoints} ⭐</span>
+        ) : (
+          <span style={{ fontSize: 10, opacity: 0.55, flexShrink: 0 }}>+{def.rewardPoints} ⭐</span>
+        )}
+      </div>
+      <div style={{ fontSize: 11, opacity: 0.6, marginTop: 2 }}>{def.description}</div>
+      {status === "in_progress" && (
+        <div style={{ fontSize: 11, marginTop: 4, color: "#93c5fd" }}>{progressText}</div>
+      )}
+    </div>
+  );
+}
+
+/** Small red count badge pinned to a nav button / the dock tab. */
+function Badge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      style={{
+        position: "absolute",
+        top: -4,
+        right: -4,
+        minWidth: 14,
+        height: 14,
+        borderRadius: 999,
+        background: "#ef4444",
+        color: "#fff",
+        fontSize: 9,
+        fontWeight: 800,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "0 3px",
+        pointerEvents: "none",
+      }}
+    >
+      {count}
+    </span>
+  );
+}
+
 export interface SideDockProps {
   side: RibbonSide;
   y: number;
@@ -167,7 +300,9 @@ export function SideDock({
   onQuit,
 }: SideDockProps) {
   const { save } = game;
-  const [view, setView] = useState<"home" | "settings">("home");
+  const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "settings">("home");
+  const leaderboard = useLeaderboard(auth.userId, open && view === "ranks");
+  const claimableTotal = game.claimableQuestCount + game.achievements.claimableCount;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tabY = useMotionValue(y);
   const filletTopY = useTransform(tabY, (v) => v - FILLET);
@@ -260,6 +395,29 @@ export function SideDock({
             background: SYNC_COLOR[game.syncStatus] ?? "#9ca3af",
           }}
         />
+        {!open && claimableTotal > 0 && (
+          <span
+            title={`${claimableTotal} reward${claimableTotal === 1 ? "" : "s"} ready to claim`}
+            style={{
+              position: "absolute",
+              bottom: 3,
+              [isRight ? "left" : "right"]: 3,
+              minWidth: 14,
+              height: 14,
+              borderRadius: 999,
+              background: "#ef4444",
+              color: "#fff",
+              fontSize: 9,
+              fontWeight: 800,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "0 3px",
+            }}
+          >
+            {claimableTotal}
+          </span>
+        )}
       </motion.button>
 
       {/* Concave fillets fusing the tab into the drawer edge. */}
@@ -317,7 +475,34 @@ export function SideDock({
           }}
         >
           <strong style={{ fontSize: 13, opacity: 0.85 }}>My Pet Companion</strong>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 5 }}>
+            {(
+              [
+                { key: "home", icon: "🏠", label: "Home", badge: 0 },
+                { key: "quests", icon: "📜", label: "Quests", badge: game.claimableQuestCount },
+                { key: "awards", icon: "🏆", label: "Achievements", badge: game.achievements.claimableCount },
+                { key: "ranks", icon: "🌍", label: "Leaderboard & hall of fame", badge: 0 },
+              ] as const
+            ).map((nav) => (
+              <button
+                key={nav.key}
+                onClick={() => setView(nav.key)}
+                title={nav.label}
+                style={{
+                  position: "relative",
+                  cursor: "pointer",
+                  border: "none",
+                  borderRadius: 6,
+                  width: 26,
+                  height: 26,
+                  fontSize: 13,
+                  background: view === nav.key ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.1)",
+                }}
+              >
+                {nav.icon}
+                <Badge count={nav.badge} />
+              </button>
+            ))}
             <button
               onClick={() => setView((v) => (v === "settings" ? "home" : "settings"))}
               title="Settings"
@@ -410,6 +595,195 @@ export function SideDock({
             <section style={{ opacity: 0.45, fontSize: 11 }}>
               Sound, pet naming and more options land here later.
             </section>
+          </div>
+        ) : view === "quests" ? (
+          <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
+            <section style={{ marginBottom: 14 }}>
+              <h2 style={sectionTitle}>Daily quests</h2>
+              {DAILY_QUEST_CODES.map((code) => (
+                <QuestCard
+                  key={code}
+                  code={code}
+                  state={save.quests?.daily.quests[code]}
+                  progressText={questProgressText(save, code)}
+                  onClaim={() => game.claimQuest(code)}
+                />
+              ))}
+            </section>
+            <section style={{ marginBottom: 10 }}>
+              <h2 style={sectionTitle}>Weekly quests</h2>
+              {WEEKLY_QUEST_CODES.map((code) => (
+                <QuestCard
+                  key={code}
+                  code={code}
+                  state={save.quests?.weekly.quests[code]}
+                  progressText={questProgressText(save, code)}
+                  onClaim={() => game.claimQuest(code)}
+                />
+              ))}
+            </section>
+            <div style={{ fontSize: 10, opacity: 0.45 }}>
+              Dailies reset each day (unclaimed rewards are lost); weeklies need any{" "}
+              {WEEKLY_QUEST_TARGET_DAYS} good days out of the week.
+            </div>
+          </div>
+        ) : view === "awards" ? (
+          <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
+            <section>
+              <h2 style={sectionTitle}>Achievements</h2>
+              {PET_ACHIEVEMENT_CODES.map((code) => {
+                const def = PET_ACHIEVEMENT_DEFINITIONS[code];
+                const entry = game.achievements.state.earned[code];
+                const progress = Math.min(def.target, game.achievements.progress(code));
+                const claimable = entry?.status === "claimable";
+                const claimed = entry?.status === "claimed";
+                return (
+                  <div
+                    key={code}
+                    style={{
+                      borderRadius: 10,
+                      background: claimable ? "rgba(251,191,36,0.12)" : "rgba(255,255,255,0.05)",
+                      border: claimable ? "1px solid rgba(251,191,36,0.45)" : "1px solid transparent",
+                      padding: "8px 10px",
+                      marginBottom: 8,
+                      opacity: claimed ? 0.75 : 1,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <strong style={{ fontSize: 12 }}>
+                        {def.icon} {def.title}
+                      </strong>
+                      {claimable ? (
+                        <button
+                          onClick={() => game.achievements.claim(code)}
+                          style={{
+                            cursor: "pointer",
+                            border: "none",
+                            borderRadius: 7,
+                            padding: "4px 10px",
+                            fontSize: 11,
+                            fontWeight: 700,
+                            background: "rgba(251,191,36,0.9)",
+                            color: "#3b2503",
+                            flexShrink: 0,
+                          }}
+                        >
+                          Claim
+                        </button>
+                      ) : claimed ? (
+                        <span style={{ fontSize: 11, color: "#fbbf24", flexShrink: 0 }}>✓ claimed</span>
+                      ) : (
+                        <span style={{ fontSize: 10, opacity: 0.55, flexShrink: 0 }}>
+                          {Math.floor(progress)}/{def.target}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.6, marginTop: 2 }}>{def.description}</div>
+                    <div style={{ fontSize: 10, marginTop: 3, color: "#fbbf24", opacity: claimed ? 1 : 0.7 }}>
+                      {describeReward(def.reward)}
+                    </div>
+                    {!claimed && !claimable && (
+                      <div
+                        style={{
+                          marginTop: 5,
+                          height: 5,
+                          borderRadius: 999,
+                          background: "rgba(255,255,255,0.08)",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${Math.min(100, (progress / def.target) * 100)}%`,
+                            height: "100%",
+                            background: "rgba(251,191,36,0.6)",
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </section>
+          </div>
+        ) : view === "ranks" ? (
+          <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
+            <section style={{ marginBottom: 16 }}>
+              <h2 style={sectionTitle}>Leaderboard — top care points</h2>
+              {leaderboard.error && (
+                <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>⚠️ {leaderboard.error}</div>
+              )}
+              {leaderboard.loading && leaderboard.entries.length === 0 && (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>Loading…</div>
+              )}
+              {leaderboard.entries.map((entry, i) => (
+                <div
+                  key={`${entry.userId}-${entry.petType}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "5px 6px",
+                    borderRadius: 7,
+                    background: entry.isSelf ? "rgba(52,211,153,0.14)" : "transparent",
+                    fontSize: 12,
+                  }}
+                >
+                  <span style={{ width: 22, opacity: 0.6, fontWeight: 700 }}>
+                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`}
+                  </span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {entry.displayName}
+                    <span style={{ opacity: 0.5 }}> · {entry.petName}</span>
+                  </span>
+                  <span title={STAGE_NAMES[entry.evolutionStage] ?? ""}>{STAGE_EMOJI[entry.evolutionStage] ?? "❔"}</span>
+                  <span style={{ color: "#fbbf24", fontWeight: 700 }}>{Math.floor(entry.carePoints)} ⭐</span>
+                </div>
+              ))}
+              {!leaderboard.loading && leaderboard.entries.length === 0 && !leaderboard.error && (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>Nobody on the board yet.</div>
+              )}
+            </section>
+
+            <section style={{ marginBottom: 10 }}>
+              <h2 style={sectionTitle}>Hall of fame</h2>
+              {leaderboard.hallOfFame.map((entry) => (
+                <div
+                  key={entry.milestoneKey}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "5px 6px",
+                    borderRadius: 7,
+                    background: entry.isSelf ? "rgba(251,191,36,0.14)" : "rgba(255,255,255,0.04)",
+                    marginBottom: 5,
+                    fontSize: 12,
+                  }}
+                >
+                  <span>🏛️</span>
+                  <span style={{ flex: 1 }}>
+                    <strong>{entry.displayName}</strong>
+                    <span style={{ opacity: 0.6 }}>
+                      {" — "}
+                      {entry.milestoneKey === "first_final_evolution"
+                        ? "first final evolution ever"
+                        : entry.milestoneKey.startsWith("first_final_")
+                          ? `first final ${entry.milestoneKey.replace("first_final_", "")}`
+                          : entry.milestoneKey}
+                    </span>
+                  </span>
+                </div>
+              ))}
+              {leaderboard.hallOfFame.length === 0 && !leaderboard.loading && (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  No legends yet — the first pet to reach its final form claims a permanent spot here.
+                </div>
+              )}
+            </section>
+            <button style={{ ...chipStyle, width: "100%", textAlign: "center" }} onClick={() => void leaderboard.refresh()}>
+              ↻ Refresh
+            </button>
           </div>
         ) : (
           <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
@@ -576,7 +950,7 @@ export function SideDock({
             )}
 
             <section style={{ marginBottom: 8, opacity: 0.5, fontSize: 11 }}>
-              Achievements &amp; quests arrive once the full pet roster is wired up.
+              📜 Quests and 🏆 achievements live in the header tabs — claim their rewards for bonus ⭐.
             </section>
           </div>
         )}

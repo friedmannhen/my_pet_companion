@@ -9,4 +9,5 @@ export * from "./workCalendar";
 export * from "./questDefinitions";
 export * from "./save";
 export * from "./decay";
+export * from "./quests";
 export * from "./achievements";

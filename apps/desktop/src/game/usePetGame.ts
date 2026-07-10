@@ -98,13 +98,6 @@ export function usePetGame(userId: string | null): PetGame {
     }
   }, [save]);
 
-  // Instant same-machine push to the stats window — see main.ts's
-  // overlay:pet-state relay. Independent of the Supabase sync below, which
-  // is about durability/cross-device, not same-machine UI latency.
-  useEffect(() => {
-    window.overlay.notifyPetState(save);
-  }, [save]);
-
   // ── Cloud load on sign-in ────────────────────────────────────────────────
   // Owner reads/writes its own pets row directly (RLS: "pets: owner full
   // access"). Cloud is authoritative when a row exists (server last_decay_tick
@@ -229,7 +222,45 @@ export function usePetGame(userId: string | null): PetGame {
       prev.isAlive ? { ...prev, feedCount: prev.feedCount + 1 } : prev,
     );
   }, []);
-  const feed = useCallback(() => careAction("hunger", 40, 5, "feedCount"), [careAction]);
+  // Feeding a pet whose hunger is already maxed is an overfeed (ERP_QA_HUB's
+  // PetContext.tsx feed()): no hunger to gain, and it costs happiness/care
+  // points instead — the deterrent against spamming Feed for free points.
+  const feed = useCallback(() => {
+    setSave((prev) => {
+      if (!prev.isAlive) return prev;
+      const nowIso = new Date().toISOString();
+      const isEggPhase = prev.evolutionStage === 0;
+      if (!isEggPhase && prev.hunger >= 100) {
+        const nextPoints = clampCarePointsForProgress(prev, prev.carePoints - 5, rules);
+        return {
+          ...prev,
+          happiness: clampStat(prev.happiness - 5),
+          carePoints: nextPoints,
+          isSleeping: false,
+          sleepKind: undefined,
+          sleepStartedAt: undefined,
+          lastInteraction: nowIso,
+          lastFed: nowIso,
+          feedCount: prev.feedCount + 1,
+          overfeedCount: (prev.overfeedCount ?? 0) + 1,
+        };
+      }
+      const before = prev.hunger;
+      const earned = proportionalPoints(5, before, 40);
+      const nextPoints = clampCarePointsForProgress(prev, prev.carePoints + earned, rules);
+      return {
+        ...prev,
+        hunger: clampStat(before + 40),
+        carePoints: nextPoints,
+        isSleeping: false,
+        sleepKind: undefined,
+        sleepStartedAt: undefined,
+        lastInteraction: nowIso,
+        lastFed: nowIso,
+        feedCount: prev.feedCount + 1,
+      };
+    });
+  }, []);
   const wash = useCallback(() => careAction("cleanliness", 60, 5, "washCount"), [careAction]);
   const pet = useCallback(() => careAction("happiness", 20, 5, "petCount"), [careAction]);
   const throwBall = useCallback(

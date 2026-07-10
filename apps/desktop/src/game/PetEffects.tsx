@@ -10,7 +10,6 @@ export type PetFxTrigger = "happy" | "eat" | "overfed" | "overheated" | null;
 
 export interface PetEffectsProps {
   trigger: PetFxTrigger;
-  readyToEvolve: boolean;
   showEvolutionBurst: boolean;
   isSleeping: boolean;
   isAlive: boolean;
@@ -92,7 +91,6 @@ function SmellWave({ id, x, delayMs }: { id: string; x: number; delayMs: number 
 
 export function PetEffects({
   trigger,
-  readyToEvolve,
   showEvolutionBurst,
   isSleeping,
   isAlive,
@@ -103,25 +101,6 @@ export function PetEffects({
 }: PetEffectsProps) {
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {/* Ready-to-evolve shimmer ring */}
-      {readyToEvolve && isAlive && (
-        <motion.div
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: "50%",
-            width: 96,
-            height: 96,
-            marginLeft: -48,
-            marginTop: -48,
-            borderRadius: "50%",
-            boxShadow: "0 0 0 3px rgba(52,211,153,0.6)",
-          }}
-          animate={{ opacity: [0.35, 0.9, 0.35], scale: [0.9, 1.08, 0.9] }}
-          transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
-        />
-      )}
-
       <AnimatePresence>
         {trigger === "happy" &&
           [0, 1, 2].map((i) => (
@@ -219,6 +198,73 @@ export function PetEffects({
             {ch}
           </motion.span>
         ))}
+
+      {/* Wash rain — falling water drops + splash accents, ported from
+          ERP_QA_HUB's PetOverlay.tsx wash sequence. */}
+      {isCleaningMode && (
+        <div
+          style={{
+            position: "absolute",
+            top: -28,
+            left: "56%",
+            height: 128,
+            width: 112,
+            transform: "translateX(-50%)",
+            overflow: "hidden",
+            pointerEvents: "none",
+          }}
+        >
+          {[
+            { x: 10, delay: 0, duration: 0.72 },
+            { x: 24, delay: 0.2, duration: 0.86 },
+            { x: 39, delay: 0.08, duration: 0.78 },
+            { x: 55, delay: 0.31, duration: 0.9 },
+            { x: 72, delay: 0.13, duration: 0.8 },
+            { x: 88, delay: 0.42, duration: 0.94 },
+          ].map((drop, i) => (
+            <motion.span
+              key={`rain-drop-${i}`}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: drop.x,
+                display: "block",
+                height: 10,
+                width: 4,
+                borderRadius: 999,
+                background: "rgba(186,230,253,0.9)",
+                boxShadow: "0 0 8px rgba(125,211,252,0.8)",
+              }}
+              initial={{ y: -12, opacity: 0, scaleY: 0.65 }}
+              animate={{ y: [-12, 92], opacity: [0, 1, 0.9, 0], scaleY: [0.65, 1.25, 0.85] }}
+              transition={{ duration: drop.duration, repeat: Infinity, delay: drop.delay, ease: "linear" }}
+            />
+          ))}
+          {[
+            { x: 12, delay: 0.56 },
+            { x: 36, delay: 0.68 },
+            { x: 60, delay: 0.5 },
+            { x: 82, delay: 0.75 },
+          ].map((splash, i) => (
+            <motion.span
+              key={`rain-splash-${i}`}
+              style={{
+                position: "absolute",
+                bottom: 20,
+                left: splash.x,
+                display: "block",
+                height: 4,
+                width: 12,
+                borderRadius: 999,
+                borderTop: "1px solid rgba(186,230,253,0.8)",
+              }}
+              initial={{ opacity: 0, scaleX: 0.2, y: 0 }}
+              animate={{ opacity: [0, 0.95, 0], scaleX: [0.2, 1.6, 2.2], y: [0, -3, 0] }}
+              transition={{ duration: 0.38, repeat: Infinity, delay: splash.delay, ease: "easeOut" }}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Evolution burst — 6 stars in a ring */}
       {showEvolutionBurst &&

@@ -61,3 +61,34 @@
     filter: brightness(4);
   }
 }
+
+/* Sustained charge-up while evolving — covers the ~10s buildup before the
+   new stage is revealed (stand-in for real sprite art, per direction). */
+.pet-anim-charging {
+  animation: pet-charging 1s ease-in-out infinite;
+}
+@keyframes pet-charging {
+  0%,
+  100% {
+    filter: brightness(1) saturate(1);
+    transform: scale(1);
+  }
+  50% {
+    filter: brightness(1.6) saturate(1.4);
+    transform: scale(1.06);
+  }
+}
+
+/* Subtle idle "breathing" — a small life-like touch when otherwise still. */
+.pet-anim-idle-breathe {
+  animation: pet-idle-breathe 2.6s ease-in-out infinite;
+}
+@keyframes pet-idle-breathe {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(1.015, 0.985);
+  }
+}

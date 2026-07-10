@@ -1,6 +1,6 @@
 // The pet's on-screen interaction surface (plan intent: the overlay shows
 // ONLY a compact interaction menu — QA-hub-style — never a data readout;
-// stats/progress live in the separate stats window, see stats/StatsApp.tsx).
+// stats/progress live in the slide-out StatsDrawer instead).
 // Segments pop outward from the pet in a staggered spring, matching the
 // QA hub's radial pet panel feel.
 import { motion } from "framer-motion";

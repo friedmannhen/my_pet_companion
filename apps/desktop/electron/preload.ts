@@ -16,20 +16,6 @@ const overlayApi = {
   setFocusable(focusable: boolean): void {
     ipcRenderer.send("overlay:set-focusable", focusable);
   },
-  /** Opens (or focuses, if already open) the separate stats/details window. */
-  openStats(): void {
-    ipcRenderer.send("overlay:open-stats");
-  },
-  /** Called by the pet overlay on every save change — instant same-machine push to the stats window. */
-  notifyPetState(save: unknown): void {
-    ipcRenderer.send("overlay:pet-state", save);
-  },
-  /** Called by the stats window to receive those pushes instantly (no poll wait). */
-  onPetState(cb: (save: unknown) => void): () => void {
-    const listener = (_evt: unknown, save: unknown) => cb(save);
-    ipcRenderer.on("pet-state", listener);
-    return () => ipcRenderer.removeListener("pet-state", listener);
-  },
   quit(): void {
     ipcRenderer.send("overlay:quit");
   },

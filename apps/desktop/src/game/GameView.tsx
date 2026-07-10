@@ -2,17 +2,20 @@
 // (see App.tsx) — this repo is online-only by design (plan MVP decision),
 // so no pet exists to render or play with before authentication.
 //
-// UI architecture (per design intent): the overlay shows ONLY the pet and a
-// compact radial interaction menu, QA-hub-style — never a stats/data
-// readout. All progress/data lives in the separate stats window
-// (stats/StatsApp.tsx, opened via the control strip's 📊 button).
+// UI architecture (per design intent): the overlay shows ONLY the pet, a
+// compact radial interaction menu, and an edge-docked control ribbon
+// (RibbonDock.tsx) — never a stock Electron window. Stats/progress live in
+// StatsDrawer.tsx, an in-overlay slide-out panel opened from the ribbon
+// (formerly a separate frameless BrowserWindow — retired once the drawer
+// pattern proved out, since living in the same renderer as the pet means it
+// can just read `game.save` directly).
 //
 // Movement/interaction mechanics (wander springs, drag-glide throw,
-// feed/wash gestures, particle timings) are ported from ERP_QA_HUB's
+// feed/wash/ball gestures, particle timings) are ported from ERP_QA_HUB's
 // usePetMovement.ts / PetOverlay.tsx / PetEffects.tsx — see those files'
 // history for the original reference implementation this was studied from.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useAnimationControls, useSpring, useTransform } from "framer-motion";
+import { AnimatePresence, animate, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import type { AuthState } from "../supabase/useAuth";
 import { usePetGame } from "./usePetGame";
 import { useSessionLease } from "../session/useSessionLease";
@@ -20,6 +23,9 @@ import { usePetMovement } from "./usePetMovement";
 import { PetEffects, type PetFxTrigger } from "./PetEffects";
 import { AdminPanel } from "./AdminPanel";
 import { RadialMenu, type RadialAction } from "./RadialMenu";
+import { RibbonDock } from "./RibbonDock";
+import { StatsDrawer } from "./StatsDrawer";
+import { useRibbonPrefs } from "./useRibbonPrefs";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
 import catBaby from "../assets/pets/black_cat/black_cat_baby.png";
@@ -29,13 +35,6 @@ import catAdultBlink from "../assets/pets/black_cat/black_cat_adult_blink.png";
 import catFinal from "../assets/pets/black_cat/black_cat_final.png";
 import catFinalBlink from "../assets/pets/black_cat/black_cat_final_blink.png";
 import catFinalSleep from "../assets/pets/black_cat/black_cat__final_sleep.png";
-
-const SYNC_COLOR: Record<string, string> = {
-  offline: "#9ca3af",
-  loading: "#fbbf24",
-  synced: "#34d399",
-  error: "#f87171",
-};
 
 const PET_SIZE = 128;
 
@@ -56,14 +55,21 @@ const chipStyle: React.CSSProperties = {
 };
 
 const TUMBLE_EASE: [number, number, number, number] = [0.2, 0, 0.8, 1];
+const THROW_EASE: [number, number, number, number] = [0.3, 0, 1, 1];
+const PET_COOLDOWN_MS = 5 * 60 * 1000;
 
 export function GameView({ auth, clickable }: { auth: AuthState; clickable: boolean }) {
   const game = usePetGame(auth.userId);
   const lease = useSessionLease(auth.userId);
   const { save } = game;
 
+  const ribbon = useRibbonPrefs();
+  const [statsOpen, setStatsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [feedPhase, setFeedPhase] = useState<"idle" | "holding" | "flying" | "eating">("idle");
+  const [eggMenuOpen, setEggMenuOpen] = useState(false);
+  const [feedPhase, setFeedPhase] = useState<"idle" | "held" | "released" | "eating">("idle");
+  const [ballPhase, setBallPhase] = useState<"idle" | "playing">("idle");
+  const [isEvolving, setIsEvolving] = useState(false);
   const [cleaningMode, setCleaningMode] = useState(false);
   const [scrubHeld, setScrubHeld] = useState(false);
   const [scrubbingEffectively, setScrubbingEffectively] = useState(false);
@@ -77,9 +83,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const [evolvePulse, setEvolvePulse] = useState(false);
   const [blinking, setBlinking] = useState(false);
 
+  // True while the pet is mid-action in a way that needs it to stand still
+  // and not be interrupted: no wander, no drag, no menu-open tap. Any
+  // interaction that's more than a single click (feed throw, ball fetch,
+  // scrubbing, evolving) sets this.
+  const petBusy = cleaningMode || feedPhase !== "idle" || ballPhase !== "idle" || isEvolving;
+
   const stationary = save.isSleeping || !save.isAlive || game.isEgg;
   const movement = usePetMovement({
-    active: !stationary && !menuOpen && feedPhase === "idle" && !cleaningMode,
+    active: !stationary && !menuOpen && !petBusy,
   });
 
   // Drag-lag lean: an overdamped spring chases the container's real
@@ -116,6 +128,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       clearTimeout(timer);
     };
   }, []);
+
+  // Petting cooldown (ERP_QA_HUB's petRules.actionCooldowns.petMs) — without
+  // this, Pet is a free, instantly-repeatable happiness/care-point source.
+  const [petCooldownMs, setPetCooldownMs] = useState(0);
+  useEffect(() => {
+    const tick = () => {
+      setPetCooldownMs(Math.max(0, PET_COOLDOWN_MS - (Date.now() - new Date(save.lastPetted).getTime())));
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [save.lastPetted]);
 
   // Hold-to-warm (hub-style egg mini-game).
   const [warming, setWarming] = useState(false);
@@ -159,78 +183,151 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     [pulseHappy],
   );
 
-  // ── Feed: hold-and-throw ────────────────────────────────────────────────
-  const foodControls = useAnimationControls();
-  const feedVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
+  // ── Feed: grab, drag, release to throw ──────────────────────────────────
+  // Mirrors usePetMovement's own drag-glide physics exactly (explicit motion
+  // values + framer's `drag` prop + manual velocity tracking + a GLIDE
+  // projected landing point) — the food is data-interactive so the normal
+  // cursor-poll hit-test makes it grabbable, and while actively dragged its
+  // rendered position tracks the cursor 1:1, so the hit-test keeps landing
+  // on it even at speed (same reason pet-dragging never goes click-through
+  // mid-drag).
+  const foodX = useMotionValue(0);
+  const foodY = useMotionValue(0);
+  const foodScale = useMotionValue(1);
+  const foodRotate = useMotionValue(0);
+  const foodOpacity = useMotionValue(0);
+  const foodVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
 
-  const startFeedThrow = useCallback(() => {
-    if (!save.isAlive || save.isSleeping) return;
-    setMenuOpen(false);
-    setClickableOverride(true);
-    window.overlay.setClickable(true);
-    setFeedPhase("holding");
-    const sx = movement.x.get() + PET_SIZE / 2;
-    const sy = movement.y.get() + PET_SIZE / 2;
-    foodControls.set({ x: sx - 24, y: sy - 24, scale: 0.9, rotate: -10, opacity: 1 });
-    feedVelRef.current = { vx: 0, vy: 0, lastX: sx, lastY: sy, lastT: performance.now() };
-  }, [save.isAlive, save.isSleeping, movement.x, movement.y, foodControls]);
-
-  const throwFood = useCallback(
-    async (releaseX: number, releaseY: number) => {
-      setFeedPhase("flying");
-      const GLIDE = 0.22;
-      const vel = feedVelRef.current;
-      const landX = Math.max(40, Math.min(window.innerWidth - 40, releaseX + vel.vx * GLIDE));
-      const landY = Math.max(60, Math.min(window.innerHeight - 100, releaseY + vel.vy * GLIDE - 30));
-
-      await foodControls.start(
-        { x: landX - 24, y: landY - 24, rotate: 15, scale: 1 },
-        { duration: 0.5, ease: TUMBLE_EASE },
-      );
-      await foodControls.start({ y: landY - 36 }, { duration: 0.12, ease: "easeOut" });
-      await foodControls.start({ y: landY - 24 }, { duration: 0.1, ease: "easeIn" });
-
-      setClickableOverride(false);
-      await movement.walkTo(landX - 44, landY - 88);
-
-      setFeedPhase("eating");
-      setFxTrigger("eat");
-      game.feed();
-      await new Promise((r) => setTimeout(r, 450));
-      await foodControls.start({ scale: 0, opacity: 0, y: landY - 54 }, { duration: 0.3, ease: "easeIn" });
-      foodControls.set({ opacity: 0, x: -200, y: -200 });
-
-      setFxTrigger(null);
-      setFeedPhase("idle");
+  // Spawn point comes from wherever the user grabbed it from — the food
+  // pile inside StatsDrawer now, not a fixed spot near the pet (Feed no
+  // longer has its own radial-menu button).
+  const startFeedThrow = useCallback(
+    (spawnX: number, spawnY: number) => {
+      if (!save.isAlive || save.isSleeping || feedPhase !== "idle") return;
+      setStatsOpen(false);
+      setMenuOpen(false);
+      foodX.set(spawnX - 20);
+      foodY.set(spawnY - 20);
+      foodScale.set(1);
+      foodRotate.set(-8);
+      foodOpacity.set(1);
+      setFeedPhase("held");
     },
-    [foodControls, movement, game],
+    [save.isAlive, save.isSleeping, feedPhase, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
 
-  useEffect(() => {
-    if (feedPhase !== "holding") return;
-    const onMove = (e: MouseEvent) => {
-      const now = performance.now();
-      const v = feedVelRef.current;
-      const dt = now - v.lastT;
-      if (dt > 0 && dt < 100) {
-        v.vx = ((e.clientX - v.lastX) / dt) * 1000;
-        v.vy = ((e.clientY - v.lastY) / dt) * 1000;
-      }
-      v.lastX = e.clientX;
-      v.lastY = e.clientY;
-      v.lastT = now;
-      foodControls.set({ x: e.clientX - 24, y: e.clientY - 24 });
-    };
-    const onClick = (e: MouseEvent) => {
-      void throwFood(e.clientX, e.clientY);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("click", onClick);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("click", onClick);
-    };
-  }, [feedPhase, foodControls, throwFood]);
+  const throwFood = useCallback(async () => {
+    setFeedPhase("released");
+    const GLIDE = 0.16;
+    const { vx, vy } = foodVelRef.current;
+    const landX = Math.max(40, Math.min(window.innerWidth - 40, foodX.get() + vx * GLIDE));
+    const landY = Math.max(80, Math.min(window.innerHeight - 100, foodY.get() + vy * GLIDE));
+
+    await Promise.all([
+      animate(foodX, landX, { type: "spring", stiffness: 100, damping: 20 }),
+      animate(foodY, landY, { type: "spring", stiffness: 100, damping: 20 }),
+    ]);
+    await animate(foodY, landY - 14, { duration: 0.12, ease: "easeOut" });
+    await animate(foodY, landY, { duration: 0.1, ease: "easeIn" });
+
+    await movement.walkTo(landX - 44, landY - 88);
+
+    setFeedPhase("eating");
+    const wasOverfed = !game.isEgg && game.save.hunger >= 100;
+    setFxTrigger(wasOverfed ? "overfed" : "eat");
+    game.feed();
+    await new Promise((r) => setTimeout(r, 450));
+    await animate(foodScale, 0, { duration: 0.3, ease: "easeIn" });
+    foodOpacity.set(0);
+    foodScale.set(1);
+
+    setFxTrigger(null);
+    setFeedPhase("idle");
+  }, [foodX, foodY, foodScale, foodOpacity, movement, game]);
+
+  const foodDragStart = useCallback(() => {
+    foodVelRef.current = { vx: 0, vy: 0, lastX: foodX.get(), lastY: foodY.get(), lastT: performance.now() };
+  }, [foodX, foodY]);
+
+  const foodDrag = useCallback(() => {
+    const now = performance.now();
+    const v = foodVelRef.current;
+    const dt = now - v.lastT;
+    if (dt > 0 && dt < 100) {
+      v.vx = ((foodX.get() - v.lastX) / dt) * 1000;
+      v.vy = ((foodY.get() - v.lastY) / dt) * 1000;
+    }
+    v.lastX = foodX.get();
+    v.lastY = foodY.get();
+    v.lastT = now;
+  }, [foodX, foodY]);
+
+  const foodDragEnd = useCallback(() => {
+    void throwFood();
+  }, [throwFood]);
+
+  // ── Ball: fire-and-forget fetch sequence, QA-hub style ──────────────────
+  // Ball bounce-drop → pet walks to it → grab-bounce → "throw at the
+  // screen" zoom-fade flourish. Not user-drag-controlled (unlike feed) —
+  // this one plays itself out once triggered.
+  const ballX = useMotionValue(0);
+  const ballY = useMotionValue(0);
+  const ballScale = useMotionValue(0);
+  const ballRotate = useMotionValue(0);
+  const ballOpacity = useMotionValue(0);
+
+  const throwBallSequence = useCallback(async () => {
+    if (!save.isAlive || save.isSleeping || game.isEgg || petBusy) return;
+    setStatsOpen(false);
+    setMenuOpen(false);
+    setBallPhase("playing");
+
+    const landX = 60 + Math.random() * (window.innerWidth - 180);
+    const landY = 80 + Math.random() * (window.innerHeight * 0.55);
+
+    ballX.set(landX);
+    ballY.set(-60);
+    ballScale.set(0.5);
+    ballRotate.set(0);
+    ballOpacity.set(1);
+
+    // Phase 1 — fall + spin to landing spot.
+    await Promise.all([
+      animate(ballY, landY, { duration: 0.72, ease: TUMBLE_EASE }),
+      animate(ballRotate, 540, { duration: 0.72, ease: TUMBLE_EASE }),
+      animate(ballScale, 1, { duration: 0.72, ease: TUMBLE_EASE }),
+    ]);
+    // Phase 1.5 — gravity bounce (2 diminishing hops).
+    await animate(ballY, landY - 32, { duration: 0.18, ease: "easeOut" });
+    await animate(ballY, landY, { duration: 0.14, ease: "easeIn" });
+    await animate(ballY, landY - 11, { duration: 0.1, ease: "easeOut" });
+    await animate(ballY, landY, { duration: 0.09, ease: "easeIn" });
+
+    // Phase 2 — pet runs to the ball.
+    await movement.walkTo(landX - 44, landY - 88);
+
+    // Phase 3 — grab: ball snaps to the pet with a quick bounce.
+    game.throwBall();
+    pulseHappy();
+    ballX.set(movement.x.get() + 40);
+    ballY.set(movement.y.get() + 15);
+    await animate(ballScale, 1.5, { duration: 0.08 });
+    await animate(ballScale, 1, { duration: 0.1 });
+
+    // Phase 4 — throw at the screen: grows toward center then fades.
+    await Promise.all([
+      animate(ballX, window.innerWidth / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
+      animate(ballY, window.innerHeight / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
+      animate(ballScale, 16, { duration: 0.65, ease: THROW_EASE }),
+      animate(ballOpacity, 0, { duration: 0.65, ease: THROW_EASE }),
+    ]);
+
+    ballOpacity.set(0);
+    ballScale.set(0);
+    ballX.set(-200);
+    ballY.set(-200);
+    setBallPhase("idle");
+  }, [save.isAlive, save.isSleeping, game, petBusy, movement, pulseHappy, ballX, ballY, ballScale, ballRotate, ballOpacity]);
 
   // ── Wash: hold sponge + scrub ────────────────────────────────────────────
   const scrubHeldRef = useRef(false);
@@ -252,17 +349,28 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     lastScrubPointRef.current = null;
     lastScrubAtRef.current = null;
     setClickableOverride(false);
+    // Restore the normal non-focusable overlay (see main.ts's comment on
+    // focusable:false — holding OS focus outside a deliberate, bounded
+    // interaction like this one is what caused apps behind the overlay to
+    // appear frozen).
+    window.overlay.setFocusable(false);
   }, []);
 
   const startCleaning = useCallback(() => {
     if (!save.isAlive || save.isSleeping || save.cleanliness >= 100) return;
     setMenuOpen(false);
+    setEggMenuOpen(false);
     const missing = Math.max(0, 100 - Math.round(save.cleanliness));
     scrubTargetRef.current = Math.min(10, Math.max(1, missing / 10)) * 1000;
     setScrubProgress(0);
     setCleaningMode(true);
     setClickableOverride(true);
     window.overlay.setClickable(true);
+    // Scrubbing is a bounded, deliberate modal interaction (like the
+    // AuthPanel's text inputs) — needs real OS keyboard focus for Escape to
+    // reach the renderer at all, since the overlay is non-focusable by
+    // default and a non-focusable window never receives key events.
+    window.overlay.setFocusable(true);
   }, [save.isAlive, save.isSleeping, save.cleanliness]);
 
   useEffect(() => {
@@ -312,15 +420,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") endCleaning(false);
     };
+    const onContext = (e: MouseEvent) => {
+      e.preventDefault();
+      endCleaning(false);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mousedown", onDown);
     window.addEventListener("mouseup", onUp);
     window.addEventListener("keydown", onKey);
+    window.addEventListener("contextmenu", onContext);
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mouseup", onUp);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("contextmenu", onContext);
     };
   }, [cleaningMode, endCleaning]);
 
@@ -385,32 +499,72 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     !save.isSleeping &&
     ((game.isEgg ? save.warmth : save.hunger) < 25 || save.cleanliness < 25 || save.happiness < 25);
 
+  // Evolving (hatch or stage-up) charges for 10s — a stand-in for real
+  // sprite art not existing yet — before the new stage is actually applied
+  // and briefly revealed with the star burst.
   const handleEvolve = useCallback(() => {
-    setEvolvePulse(true);
-    game.hatchOrEvolve();
-    setTimeout(() => setEvolvePulse(false), 2700);
-  }, [game]);
+    if (petBusy) return;
+    setMenuOpen(false);
+    setEggMenuOpen(false);
+    setIsEvolving(true);
+    setTimeout(() => {
+      setEvolvePulse(true);
+      game.hatchOrEvolve();
+      setTimeout(() => {
+        setEvolvePulse(false);
+        setIsEvolving(false);
+      }, 2700);
+    }, 10000);
+  }, [game, petBusy]);
 
-  const radialActions: RadialAction[] = [
-    { key: "feed", icon: "🍖", label: "Feed", onClick: startFeedThrow, disabled: save.isSleeping },
-    { key: "wash", icon: "🧼", label: "Wash", onClick: startCleaning, disabled: save.isSleeping || save.cleanliness >= 100 },
-    { key: "pet", icon: "🤗", label: "Pet", onClick: () => act(game.pet, "happy"), disabled: save.isSleeping },
-    { key: "ball", icon: "⚾", label: "Ball", onClick: () => act(game.throwBall, "happy"), disabled: save.isSleeping },
-    { key: "sleep", icon: save.isSleeping ? "☀️" : "🌙", label: save.isSleeping ? "Wake" : "Tuck in", onClick: game.toggleSleep },
-  ];
-  if (game.canEvolve) {
+  // Feed and Ball moved to StatsDrawer's kitchen/toy box — the radial menu
+  // only handles instant-click care actions now. While asleep, the only
+  // meaningful action is waking up, so nothing else even shows.
+  const radialActions: RadialAction[] = save.isSleeping
+    ? [{ key: "sleep", icon: "☀️", label: "Wake", onClick: game.toggleSleep }]
+    : [
+        { key: "wash", icon: "🧼", label: "Wash", onClick: startCleaning, disabled: save.cleanliness >= 100 },
+        { key: "pet", icon: "🤗", label: "Pet", onClick: () => act(game.pet, "happy"), disabled: petCooldownMs > 0 },
+        { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
+      ];
+  if (!save.isSleeping && game.canEvolve) {
     radialActions.push({ key: "evolve", icon: "✨", label: "Evolve!", onClick: handleEvolve, highlight: true });
   }
 
-  const showRadial = !game.isEgg && save.isAlive && menuOpen;
+  const eggActions: RadialAction[] = [
+    { key: "wash", icon: "🧼", label: "Clean", onClick: startCleaning, disabled: save.cleanliness >= 100 },
+  ];
+
+  const canFeed = save.isAlive && !save.isSleeping && feedPhase === "idle";
+  const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
+
+  const showRadial = !game.isEgg && save.isAlive && menuOpen && !petBusy;
+  const showEggMenu = game.isEgg && save.isAlive && eggMenuOpen && !petBusy;
+
+  const idleBreathing =
+    save.isAlive && !game.isEgg && !save.isSleeping && !movement.isMoving && !petBusy && !happyPulse && !evolvePulse;
+
   const bodyClass = [
-    movement.isMoving && feedPhase !== "flying" ? "pet-anim-walk" : "",
+    movement.isMoving ? "pet-anim-walk" : "",
     feedPhase === "eating" ? "pet-anim-eat" : "",
     happyPulse ? "pet-anim-happy" : "",
     evolvePulse ? "pet-anim-evolve" : "",
+    isEvolving ? "pet-anim-charging" : "",
+    idleBreathing ? "pet-anim-idle-breathe" : "",
   ]
     .filter(Boolean)
     .join(" ");
+
+  // A hold-to-warm gesture that turns into an actual drag hands off to
+  // usePetMovement's own drag handlers — cancel the warm interval so a
+  // dragged egg doesn't also rack up warmth.
+  const petDragHandlers = {
+    ...movement.dragHandlers,
+    onDragStart: () => {
+      if (game.isEgg) stopWarmHold();
+      movement.dragHandlers.onDragStart();
+    },
+  };
 
   return (
     <>
@@ -435,59 +589,62 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
       {import.meta.env.DEV && <AdminPanel game={game} />}
 
-      {/* Compact always-visible control strip — app/account controls, not game data. */}
-      <div
+      {/* Edge control tab — drag to redock anywhere on either edge, click to
+          open the drawer directly (no intermediate popover). */}
+      <RibbonDock
+        side={ribbon.side}
+        y={ribbon.y}
+        onDock={ribbon.setDock}
+        open={statsOpen}
+        onToggle={() => setStatsOpen((o) => !o)}
+        syncStatus={game.syncStatus}
+        syncError={game.syncError}
+      />
+      <StatsDrawer
+        open={statsOpen}
+        onClose={() => setStatsOpen(false)}
+        game={game}
+        auth={auth}
+        side={ribbon.side}
+        lease={lease}
+        canFeed={canFeed}
+        canPlayBall={canPlayBall}
+        onCollectFood={startFeedThrow}
+        onThrowBall={() => void throwBallSequence()}
+        onSignOut={auth.signOut}
+        onQuit={() => window.overlay.quit()}
+      />
+
+      {/* Food — always mounted so the very first .set() call (before any
+          conditional remount) actually lands on a live motion value. Grab
+          it (data-interactive makes it hit-testable), drag, and release to
+          throw — same physics family as dragging the pet itself. */}
+      <motion.div
         data-interactive
+        drag={feedPhase === "held"}
+        dragMomentum={false}
+        dragElastic={0}
+        onDragStart={foodDragStart}
+        onDrag={foodDrag}
+        onDragEnd={foodDragEnd}
         style={{
           position: "fixed",
-          bottom: 12,
-          right: 12,
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "6px 8px",
-          borderRadius: 10,
-          background: "rgba(20,20,26,0.85)",
-          fontFamily: "'Segoe UI', system-ui, sans-serif",
+          left: 0,
+          top: 0,
+          fontSize: 40,
+          zIndex: 20000,
+          x: foodX,
+          y: foodY,
+          scale: foodScale,
+          rotate: foodRotate,
+          opacity: foodOpacity,
+          cursor: feedPhase === "held" ? "grab" : "default",
+          pointerEvents: feedPhase === "held" ? "auto" : "none",
         }}
       >
-        <span
-          title={game.syncError ?? game.syncStatus}
-          style={{ width: 8, height: 8, borderRadius: "50%", background: SYNC_COLOR[game.syncStatus], flexShrink: 0 }}
-        />
-        {lease.status === "conflict" && (
-          <button
-            style={{ ...chipStyle, background: "rgba(248,113,113,0.35)" }}
-            onClick={lease.forceTakeover}
-            title={lease.conflict ? `Active on ${lease.conflict.deviceType} — click to take over here` : "Active elsewhere"}
-          >
-            ⚠️ Take over
-          </button>
-        )}
-        <button style={chipStyle} onClick={() => window.overlay.openStats()}>
-          📊 Stats
-        </button>
-        <button style={chipStyle} onClick={auth.signOut}>
-          Sign out
-        </button>
-        <button style={{ ...chipStyle, opacity: 0.7 }} onClick={() => window.overlay.quit()}>
-          Quit
-        </button>
-      </div>
-
-      {/* Food — held, thrown, and eaten. Not data-interactive: the whole
-          screen is forced-clickable during hold/flight via clickableOverride,
-          and release is a plain window click, not a click on the food itself. */}
-      {feedPhase !== "idle" && (
-        <motion.div
-          style={{ position: "fixed", left: 0, top: 0, fontSize: 40, pointerEvents: "none", zIndex: 20000 }}
-          animate={foodControls}
-          initial={{ opacity: 0 }}
-        >
-          🍖
-        </motion.div>
-      )}
-      {feedPhase === "holding" && (
+        🍖
+      </motion.div>
+      {feedPhase === "held" && (
         <div
           style={{
             position: "fixed",
@@ -504,9 +661,29 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             zIndex: 20000,
           }}
         >
-          🍖 Click anywhere to throw the food!
+          🍖 Drag the food, then let go to throw it!
         </div>
       )}
+
+      {/* Ball — same always-mounted pattern, but this one plays itself out
+          (fire-and-forget), not user-dragged. */}
+      <motion.div
+        style={{
+          position: "fixed",
+          left: 0,
+          top: 0,
+          fontSize: 34,
+          zIndex: 20000,
+          pointerEvents: "none",
+          x: ballX,
+          y: ballY,
+          scale: ballScale,
+          rotate: ballRotate,
+          opacity: ballOpacity,
+        }}
+      >
+        ⚾
+      </motion.div>
 
       {/* Wash: sponge cursor + progress + bubbles */}
       {cleaningMode && (
@@ -517,17 +694,44 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               bottom: 90,
               left: "50%",
               transform: "translateX(-50%)",
-              zIndex: 20000,
-              padding: "8px 16px",
+              // Higher than the pet's (unstyled, effectively 0) stacking
+              // order — without this, the pet's own always-present hitbox
+              // painted later in the DOM could sit on top of this panel and
+              // swallow clicks meant for the X button below.
+              zIndex: 21000,
+              padding: "8px 30px 8px 16px",
               borderRadius: 14,
               background: scrubbingEffectively ? "rgba(8,47,73,0.9)" : "rgba(20,20,26,0.88)",
               color: "#bae6fd",
               fontSize: 12,
               fontWeight: 700,
               textAlign: "center",
-              pointerEvents: "none",
             }}
           >
+            <button
+              data-interactive
+              onClick={() => endCleaning(false)}
+              // Stop this mousedown from also reaching the cleaningMode
+              // effect's window-level scrub-start listener — otherwise
+              // clicking the X was also registering as the start of a scrub.
+              onMouseDown={(e) => e.stopPropagation()}
+              title="Cancel washing"
+              style={{
+                position: "absolute",
+                top: 4,
+                right: 6,
+                cursor: "pointer",
+                border: "none",
+                background: "transparent",
+                color: "#bae6fd",
+                fontSize: 14,
+                fontWeight: 900,
+                padding: 2,
+                lineHeight: 1,
+              }}
+            >
+              ✕
+            </button>
             Hold and scrub the pet with the sponge
             <div style={{ marginTop: 4, height: 6, borderRadius: 999, background: "rgba(0,0,0,0.3)", overflow: "hidden" }}>
               <div
@@ -542,6 +746,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             </div>
             <div style={{ marginTop: 4, fontSize: 10, fontWeight: 600, opacity: 0.8 }}>
               {scrubHeld ? (scrubbingEffectively ? "Cleaning…" : "Keep the sponge moving") : "Hold left mouse and move over the pet"}
+              {" · Esc, right-click, or ✕ to cancel"}
             </div>
           </div>
           <motion.div
@@ -551,7 +756,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               top: scrubCursor.y - 18,
               fontSize: 32,
               pointerEvents: "none",
-              zIndex: 20001,
+              zIndex: 21002,
             }}
             animate={
               scrubHeld
@@ -566,7 +771,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             {bubbles.map((b) => (
               <motion.span
                 key={b.id}
-                style={{ position: "fixed", left: b.x, top: b.y, fontSize: b.size, pointerEvents: "none", zIndex: 19999 }}
+                style={{ position: "fixed", left: b.x, top: b.y, fontSize: b.size, pointerEvents: "none", zIndex: 21001 }}
                 initial={{ opacity: 0.95, x: 0, y: 0, scale: 0.35, rotate: 0 }}
                 animate={{
                   opacity: [0.95, 0.84, 0.68, 0],
@@ -589,12 +794,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       <motion.div
         data-interactive
         style={{ position: "fixed", left: 0, top: 0, width: PET_SIZE, height: PET_SIZE, x: movement.x, y: movement.y }}
-        {...(!game.isEgg && save.isAlive ? movement.dragHandlers : {})}
+        {...(save.isAlive && !petBusy ? petDragHandlers : {})}
       >
-        {/* Status blips above the pet */}
-        {save.isSleeping && save.isAlive && (
-          <div style={{ position: "absolute", top: -18, left: 8, fontSize: 18, pointerEvents: "none" }}>💤</div>
-        )}
+        {/* Status blip above the pet — sleeping already has PetEffects' own
+            animated ZZZ particles, no need for a second static icon. */}
         {needsAttention && (
           <div style={{ position: "absolute", top: -18, right: 8, fontSize: 18, pointerEvents: "none" }}>❗</div>
         )}
@@ -610,14 +813,30 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           that entirely.
         */}
         <motion.div
-          // A ready-to-hatch egg has no radial menu (eggs only hold-to-warm),
-          // so a plain tap is its hatch trigger — a quick tap never becomes
-          // a "hold" (startWarmHold's interval hasn't ticked yet), so this
-          // can't be mistaken for warming.
-          onClick={game.isEgg ? (game.canHatch ? handleEvolve : undefined) : () => setMenuOpen((o) => !o)}
-          onPointerDown={game.isEgg && save.isAlive ? startWarmHold : undefined}
-          onPointerUp={game.isEgg && save.isAlive ? stopWarmHold : undefined}
-          onPointerLeave={game.isEgg && save.isAlive ? stopWarmHold : undefined}
+          // A ready-to-hatch egg has no radial menu (eggs only hold-to-warm
+          // or right-click-to-clean), so a plain tap is its hatch trigger —
+          // a quick tap never becomes a "hold" (startWarmHold's interval
+          // hasn't ticked yet), so this can't be mistaken for warming.
+          onClick={
+            game.isEgg
+              ? game.canHatch && !petBusy
+                ? handleEvolve
+                : undefined
+              : petBusy
+                ? undefined
+                : () => setMenuOpen((o) => !o)
+          }
+          onContextMenu={
+            game.isEgg && !petBusy
+              ? (e) => {
+                  e.preventDefault();
+                  setEggMenuOpen((o) => !o);
+                }
+              : undefined
+          }
+          onPointerDown={game.isEgg && save.isAlive && !petBusy ? startWarmHold : undefined}
+          onPointerUp={game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
+          onPointerLeave={game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
           style={{
             cursor: "pointer",
             width: PET_SIZE,
@@ -636,7 +855,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             {visual}
             <PetEffects
               trigger={fxTrigger}
-              readyToEvolve={game.canHatch || game.canEvolve}
               showEvolutionBurst={evolvePulse}
               isSleeping={save.isSleeping}
               isAlive={save.isAlive}
@@ -665,6 +883,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         </motion.div>
 
         <AnimatePresence>{showRadial && <RadialMenu key="radial" actions={radialActions} />}</AnimatePresence>
+        <AnimatePresence>{showEggMenu && <RadialMenu key="egg-radial" actions={eggActions} radius={60} />}</AnimatePresence>
 
         {!save.isAlive && menuOpen && (
           <div

@@ -1,0 +1,8 @@
+/* Shared HUD chrome rules — currently just the scrollbar hider used by
+   StatsDrawer. Kept as a real (if invisible) scroll container rather than
+   forcing content to always fit, since the drawer is sized to nearly the
+   full work-area height already and this is the safety net for smaller
+   displays, not the primary fix. */
+.mpc-no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

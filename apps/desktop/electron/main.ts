@@ -16,7 +16,6 @@ import { join } from "node:path";
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 
 let overlay: BrowserWindow | null = null;
-let statsWindow: BrowserWindow | null = null;
 
 function createOverlay(): void {
   const { workArea } = screen.getPrimaryDisplay();
@@ -100,16 +99,6 @@ function createOverlay(): void {
     if (focusable) overlay.focus();
   });
 
-  ipcMain.on("overlay:open-stats", () => createOrFocusStatsWindow());
-
-  // Instant same-machine relay: the overlay pushes its save on every change
-  // straight to the stats window over IPC (no network round-trip), so the
-  // HUD updates the moment you feed/wash/pet instead of waiting out its
-  // Supabase poll interval.
-  ipcMain.on("overlay:pet-state", (_evt, save) => {
-    statsWindow?.webContents.send("pet-state", save);
-  });
-
   ipcMain.on("overlay:quit", () => app.quit());
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -120,53 +109,6 @@ function createOverlay(): void {
 
   overlay.on("closed", () => {
     overlay = null;
-  });
-}
-
-/**
- * The detailed stats/quests/achievements view (plan §17: "a separate main
- * game window", not more clutter on the pet overlay). A real, independently
- * focusable/movable/closable window (none of the overlay's click-through/
- * DWM-occlusion baggage applies) — but frameless/transparent so it reads as
- * a HUD panel rather than a stock Electron app window, matching the design
- * intent ("all HUD of the game should be a smooth overlay on screen").
- * StatsApp.tsx supplies its own rounded panel chrome, drag handle, and
- * close button since there's no OS title bar here.
- */
-function createOrFocusStatsWindow(): void {
-  if (statsWindow && !statsWindow.isDestroyed()) {
-    statsWindow.show();
-    statsWindow.focus();
-    return;
-  }
-
-  statsWindow = new BrowserWindow({
-    width: 420,
-    height: 640,
-    frame: false,
-    transparent: true,
-    hasShadow: true,
-    backgroundColor: "#00000000",
-    webPreferences: {
-      preload: join(__dirname, "../preload/preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-
-  if (process.env.ELECTRON_RENDERER_URL) {
-    // `new URL` correctly normalizes the slash regardless of whether
-    // ELECTRON_RENDERER_URL already ends in one (a naive template-string
-    // join here previously produced "http://localhost:5173//stats.html",
-    // a 404 that left the window blank).
-    void statsWindow.loadURL(new URL("stats.html", process.env.ELECTRON_RENDERER_URL).toString());
-  } else {
-    void statsWindow.loadFile(join(__dirname, "../renderer/stats.html"));
-  }
-
-  statsWindow.on("closed", () => {
-    statsWindow = null;
   });
 }
 

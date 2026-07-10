@@ -290,15 +290,22 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // — a cross-element "start a drag on a different, always-mounted element
   // from a pile item's pointerdown" handoff proved unreliable here).
   //
-  // The mousemove/mouseup listeners are attached SYNCHRONOUSLY inside the
-  // same onPointerDown handler that starts the grab — not via a useEffect
+  // The tracking listeners are attached SYNCHRONOUSLY inside the same
+  // onPointerDown handler that starts the grab — not via a useEffect
   // reacting to feedPhase turning "held". A useEffect only runs after React
   // commits the state change (a render + a scheduled effect pass), and for
   // a quick click (press, then release almost immediately — no real hold)
-  // the native mouseup can fire before that effect ever attaches, so the
-  // release is silently missed and nothing happens beyond the pile fading.
-  // Wash doesn't hit this because it starts on onClick (fires only after
-  // mouseup already happened), not onPointerDown.
+  // the native release can fire before that effect ever attaches, so it'd
+  // be silently missed. Wash doesn't hit this because it starts on onClick
+  // (fires only after release already happened), not onPointerDown.
+  //
+  // Tracking uses POINTER events (pointermove/pointerup), not legacy mouse
+  // events. SideDock's pile item calls preventDefault() on its pointerdown
+  // (to stop native drag-ghost/selection) — per spec, that suppresses the
+  // browser's *compatibility mouse events* (mousedown/mousemove/mouseup)
+  // for the rest of that gesture, even for a real mouse, not just touch.
+  // mousemove/mouseup listeners here would simply never fire. Pointer
+  // events aren't compatibility shims, so they're unaffected.
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
   const foodScale = useMotionValue(1);
@@ -314,6 +321,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const grabFood = useCallback(
     (e: React.PointerEvent, slot: number) => {
+      if (e.button !== 0) return;
       if (!canFeed) return;
       if (!consumables.takeFood(slot)) return;
       setStatsOpen(false);
@@ -330,7 +338,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       foodVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setFeedPhase("held");
 
-      const onMove = (ev: MouseEvent) => {
+      const onMove = (ev: PointerEvent) => {
         const now = performance.now();
         const v = foodVelRef.current;
         const nx = ev.clientX - 20;
@@ -347,12 +355,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         foodY.set(ny);
       };
       const onUp = () => {
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
         throwFoodRef.current();
       };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
     },
     [canFeed, consumables, foodX, foodY, foodScale, foodRotate, foodOpacity],
   );
@@ -405,6 +413,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const grabBall = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
       if (!canPlayBall) return;
       if (!consumables.takeBall()) return;
       setStatsOpen(false);
@@ -421,7 +430,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       ballVelRef.current = { vx: 0, vy: 0, lastX: x, lastY: y, lastT: performance.now() };
       setBallPhase("held");
 
-      const onMove = (ev: MouseEvent) => {
+      const onMove = (ev: PointerEvent) => {
         const now = performance.now();
         const v = ballVelRef.current;
         const nx = ev.clientX - 17;
@@ -438,12 +447,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         ballY.set(ny);
       };
       const onUp = () => {
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
         runBallFetchRef.current();
       };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
     },
     [canPlayBall, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity],
   );

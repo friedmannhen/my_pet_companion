@@ -31,6 +31,8 @@ import { RadialMenu, type RadialAction } from "./RadialMenu";
 import { SideDock } from "./SideDock";
 import { useRibbonPrefs } from "./useRibbonPrefs";
 import { useConsumables } from "./useConsumables";
+import { useGamePrefs } from "./useGamePrefs";
+import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
 import catBaby from "../assets/pets/black_cat/black_cat_baby.png";
@@ -96,6 +98,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const ribbon = useRibbonPrefs();
   const consumables = useConsumables();
+  const prefs = useGamePrefs();
+  const soundRef = useRef(prefs.soundEnabled);
+  soundRef.current = prefs.soundEnabled;
+  const sfx = useCallback((play: () => void) => {
+    if (soundRef.current) play();
+  }, []);
   const [statsOpen, setStatsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [feedPhase, setFeedPhase] = useState<"idle" | "held" | "released" | "eating">("idle");
@@ -215,6 +223,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     fn();
   }, []);
 
+  // Death knell — plays once on the alive→dead transition.
+  const wasAliveRef = useRef(save.isAlive);
+  useEffect(() => {
+    if (wasAliveRef.current && !save.isAlive) sfx(Sounds.playDeath);
+    wasAliveRef.current = save.isAlive;
+  }, [save.isAlive, sfx]);
+
   // Petting cooldown (ERP_QA_HUB's petRules.actionCooldowns.petMs) — without
   // this, Pet is a free, instantly-repeatable happiness/care-point source.
   const [petCooldownMs, setPetCooldownMs] = useState(0);
@@ -319,6 +334,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setFeedPhase("eating");
     const wasOverfed = !game.isEgg && game.save.hunger >= 100;
     setFxTrigger(wasOverfed ? "overfed" : "eat");
+    sfx(Sounds.playNom);
     expectDeltaRef.current = true;
     game.feed();
     await new Promise((r) => setTimeout(r, 450));
@@ -464,6 +480,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const endCleaning = useCallback((completed: boolean) => {
     if (completed) {
+      sfx(Sounds.playSplash);
       expectDeltaRef.current = true;
       gameRef.current.wash();
     }
@@ -481,7 +498,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     // interaction like this one is what caused apps behind the overlay to
     // appear frozen).
     window.overlay.setFocusable(false);
-  }, []);
+  }, [sfx]);
 
   const startCleaning = useCallback(() => {
     if (!save.isAlive || save.isSleeping || save.cleanliness >= 100) return;
@@ -635,13 +652,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setIsEvolving(true);
     setTimeout(() => {
       setEvolvePulse(true);
+      sfx(Sounds.playEvolution);
       game.hatchOrEvolve();
       setTimeout(() => {
         setEvolvePulse(false);
         setIsEvolving(false);
       }, 2700);
     }, 10000);
-  }, [game, petBusy]);
+  }, [game, petBusy, sfx]);
 
   // Feed/Wash/Ball all live in the SideDock now — the radial menu only
   // handles instant-click care actions. While asleep, the only meaningful
@@ -654,6 +672,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           icon: "🤗",
           label: petCooldownMs > 0 ? `Pet (${Math.ceil(petCooldownMs / 60000)}m)` : "Pet",
           onClick: () => {
+            sfx(Sounds.playSqueak);
             withDeltas(game.pet);
             pulseHappy();
           },
@@ -735,6 +754,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onGrabBall={grabBall}
         canClean={canClean}
         onStartClean={startCleaning}
+        soundEnabled={prefs.soundEnabled}
+        onToggleSound={prefs.toggleSound}
+        onRename={game.rename}
         onSignOut={auth.signOut}
         onQuit={() => window.overlay.quit()}
       />
@@ -960,7 +982,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
                 : undefined
               : petBusy
                 ? undefined
-                : () => setMenuOpen((o) => !o)
+                : () => {
+                    setMenuOpen((o) => {
+                      if (!o) sfx(Sounds.playSwish);
+                      return !o;
+                    });
+                  }
           }
           onPointerDown={game.isEgg && save.isAlive && !petBusy ? startWarmHold : undefined}
           onPointerUp={game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}

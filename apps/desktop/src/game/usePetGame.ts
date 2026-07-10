@@ -95,6 +95,8 @@ export interface PetGame {
   hatchOrEvolve: () => void;
   toggleSleep: () => void;
   restart: () => void;
+  /** Rename the pet (trimmed, 1–24 chars — no-op otherwise). */
+  rename: (name: string) => void;
   /** Claim a claimable daily/weekly quest — awards its care-point reward. */
   claimQuest: (code: PetQuestCode) => void;
   claimableQuestCount: number;
@@ -457,6 +459,12 @@ export function usePetGame(userId: string | null): PetGame {
     setSave(freshPetSave({ petType: "cat" }));
   }, []);
 
+  const rename = useCallback((name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 24) return;
+    setSave((prev) => ({ ...prev, name: trimmed }));
+  }, []);
+
   // ── Dev-only helpers (reachable only from the DEV-gated admin panel) ──────
   const debugApply = useCallback((patch: Partial<PetSaveData>) => {
     setSave((prev) => ({ ...prev, ...patch, lastInteraction: new Date().toISOString() }));
@@ -504,6 +512,7 @@ export function usePetGame(userId: string | null): PetGame {
     hatchOrEvolve,
     toggleSleep,
     restart,
+    rename,
     claimQuest,
     claimableQuestCount: countClaimableQuests(save),
     achievements,

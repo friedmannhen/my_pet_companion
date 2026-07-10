@@ -123,10 +123,12 @@ game's drawer.
   itself (not a separate window), so it updates the instant you interact
   with the pet.
 - The **⚙ Settings view** (gear button in the drawer header) has: dock
-  side (left/right edge), **⚠️ Take over** (only shown if your account is
-  active on another device — click to make *this* the live session),
-  **Sign out**, and **Quit**. A red sync-error message appears here too if
-  something's wrong with cloud sync.
+  side (left/right edge), a **🔊 sound toggle** (feeding noms, wash
+  splashes, pet squeaks, evolution fanfares — all synthesized, no audio
+  files), **renaming your pet**, **⚠️ Take over** (only shown if your
+  account is active on another device — click to make *this* the live
+  session), **Sign out**, and **Quit**. A red sync-error message appears
+  here too if something's wrong with cloud sync.
 - A colored dot on the tab shows cloud-sync status at a glance (green =
   synced, yellow = syncing, gray = offline, red = error). A red number
   badge on the tab means you have unclaimed quest/achievement rewards.

@@ -272,6 +272,9 @@ export interface SideDockProps {
   onGrabBall: (e: React.PointerEvent) => void;
   canClean: boolean;
   onStartClean: () => void;
+  soundEnabled: boolean;
+  onToggleSound: () => void;
+  onRename: (name: string) => void;
   onSignOut: () => void;
   onQuit: () => void;
 }
@@ -296,11 +299,30 @@ export function SideDock({
   onGrabBall,
   canClean,
   onStartClean,
+  soundEnabled,
+  onToggleSound,
+  onRename,
   onSignOut,
   onQuit,
 }: SideDockProps) {
   const { save } = game;
   const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "settings">("home");
+  const [nameDraft, setNameDraft] = useState(save.name);
+
+  // The rename input needs real OS keyboard focus (the overlay window is
+  // non-focusable by default — see main.ts). Granted only while the
+  // settings view is actually open, same bounded-interaction pattern as
+  // wash-scrub and the auth card.
+  const settingsActive = open && view === "settings";
+  useEffect(() => {
+    if (!settingsActive) return;
+    window.overlay.setFocusable(true);
+    return () => window.overlay.setFocusable(false);
+  }, [settingsActive]);
+  useEffect(() => {
+    if (settingsActive) setNameDraft(save.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsActive]);
   const leaderboard = useLeaderboard(auth.userId, open && view === "ranks");
   const claimableTotal = game.claimableQuestCount + game.achievements.claimableCount;
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -564,6 +586,41 @@ export function SideDock({
             </section>
 
             <section style={{ marginBottom: 18 }}>
+              <h2 style={sectionTitle}>Game</h2>
+              <button style={{ ...chipStyle, width: "100%", textAlign: "left" }} onClick={onToggleSound}>
+                {soundEnabled ? "🔊 Sounds: on" : "🔇 Sounds: off"}
+              </button>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <input
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onRename(nameDraft);
+                  }}
+                  maxLength={24}
+                  placeholder="Pet name"
+                  style={{
+                    flex: 1,
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 7,
+                    padding: "6px 8px",
+                    fontSize: 12,
+                    background: "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  style={{ ...chipStyle, opacity: nameDraft.trim() && nameDraft.trim() !== save.name ? 1 : 0.5 }}
+                  onClick={() => onRename(nameDraft)}
+                  disabled={!nameDraft.trim() || nameDraft.trim() === save.name}
+                >
+                  Rename
+                </button>
+              </div>
+            </section>
+
+            <section style={{ marginBottom: 18 }}>
               <h2 style={sectionTitle}>Account</h2>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {game.syncStatus === "error" && (
@@ -593,7 +650,7 @@ export function SideDock({
             </section>
 
             <section style={{ opacity: 0.45, fontSize: 11 }}>
-              Sound, pet naming and more options land here later.
+              More options land here as the game grows.
             </section>
           </div>
         ) : view === "quests" ? (

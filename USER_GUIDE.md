@@ -188,7 +188,13 @@ Visible only in development builds (never in a packaged release), a small
 - **+care points** and **set all stats to a value** buttons.
 - **Time jump** buttons that simulate the app having been closed for 1/12/80
   hours, replaying decay so you can test offline catch-up and sleep-
-  protection expiry without actually waiting.
+  protection expiry without actually waiting — also clears the petting
+  cooldown and the quest engine's 1h qualified-action gaps.
+- **Cooldowns & items**: instantly clear all cooldowns, or refill the food
+  pile/return the ball, without waiting or time-jumping.
+- **Reset**: wipe just quests, just achievements, or just this account's
+  hall-of-fame claims — or a confirm-gated **💥 Full reset** that does all
+  of the above plus starts a fresh pet.
 
 ## Known gaps (things not built yet)
 

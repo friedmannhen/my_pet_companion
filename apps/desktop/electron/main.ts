@@ -102,6 +102,14 @@ function createOverlay(): void {
 
   ipcMain.on("overlay:open-stats", () => createOrFocusStatsWindow());
 
+  // Instant same-machine relay: the overlay pushes its save on every change
+  // straight to the stats window over IPC (no network round-trip), so the
+  // HUD updates the moment you feed/wash/pet instead of waiting out its
+  // Supabase poll interval.
+  ipcMain.on("overlay:pet-state", (_evt, save) => {
+    statsWindow?.webContents.send("pet-state", save);
+  });
+
   ipcMain.on("overlay:quit", () => app.quit());
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -117,9 +125,13 @@ function createOverlay(): void {
 
 /**
  * The detailed stats/quests/achievements view (plan §17: "a separate main
- * game window", not more clutter on the pet overlay). Ordinary decorated,
- * resizable, focusable window — none of the overlay's transparency/
- * click-through/DWM concerns apply here.
+ * game window", not more clutter on the pet overlay). A real, independently
+ * focusable/movable/closable window (none of the overlay's click-through/
+ * DWM-occlusion baggage applies) — but frameless/transparent so it reads as
+ * a HUD panel rather than a stock Electron app window, matching the design
+ * intent ("all HUD of the game should be a smooth overlay on screen").
+ * StatsApp.tsx supplies its own rounded panel chrome, drag handle, and
+ * close button since there's no OS title bar here.
  */
 function createOrFocusStatsWindow(): void {
   if (statsWindow && !statsWindow.isDestroyed()) {
@@ -131,8 +143,10 @@ function createOrFocusStatsWindow(): void {
   statsWindow = new BrowserWindow({
     width: 420,
     height: 640,
-    title: "My Pet Companion — Details",
-    backgroundColor: "#15151b",
+    frame: false,
+    transparent: true,
+    hasShadow: true,
+    backgroundColor: "#00000000",
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,

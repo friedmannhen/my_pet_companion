@@ -98,6 +98,13 @@ export function usePetGame(userId: string | null): PetGame {
     }
   }, [save]);
 
+  // Instant same-machine push to the stats window — see main.ts's
+  // overlay:pet-state relay. Independent of the Supabase sync below, which
+  // is about durability/cross-device, not same-machine UI latency.
+  useEffect(() => {
+    window.overlay.notifyPetState(save);
+  }, [save]);
+
   // ── Cloud load on sign-in ────────────────────────────────────────────────
   // Owner reads/writes its own pets row directly (RLS: "pets: owner full
   // access"). Cloud is authoritative when a row exists (server last_decay_tick

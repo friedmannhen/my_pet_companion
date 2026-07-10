@@ -14,9 +14,12 @@
         height: 100%;
       }
       body {
-        background: #15151b;
+        /* Window itself is transparent (frameless HUD panel) — StatsApp.tsx
+           supplies the actual rounded dark panel background. */
+        background: transparent;
         color: #fff;
         font-family: "Segoe UI", system-ui, sans-serif;
+        overflow: hidden;
       }
     </style>
   </head>

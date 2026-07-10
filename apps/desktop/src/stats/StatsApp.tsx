@@ -1,8 +1,14 @@
 // The separate "main game window" (plan §17) — detailed stats/progress live
 // here instead of cluttering the pet overlay, which only shows a compact
 // radial interaction menu now (see game/RadialMenu.tsx). Read-only: the
-// overlay window owns the decay tick and writes; this window just polls the
-// same `pets` row so it stays cheap and can't race the overlay's writes.
+// overlay window owns the decay tick and writes; this window receives an
+// instant same-machine push on every save change (see main.ts's
+// overlay:pet-state relay) and separately polls Supabase as a slow backup
+// (covers the window being opened before/without a live push arriving).
+//
+// Frameless + transparent (see main.ts) so this reads as a HUD panel, not a
+// stock Electron window — this component supplies its own rounded panel
+// chrome, drag handle, and close button since there's no OS title bar.
 import { useCallback, useEffect, useState } from "react";
 import { DEFAULT_PET_RULES, type PetSaveData } from "@pet/core";
 import { useAuth } from "../supabase/useAuth";
@@ -10,7 +16,7 @@ import { supabase } from "../supabase/client";
 import { rowToSave, type PetRow } from "../supabase/petRow";
 
 const rules = DEFAULT_PET_RULES;
-const POLL_MS = 5000;
+const POLL_MS = 20_000;
 const STAGE_NAMES = ["Egg", "Baby", "Adult", "Final"];
 
 function Bar({ label, value, color }: { label: string; value: number; color: string }) {
@@ -67,6 +73,59 @@ const sectionTitle: React.CSSProperties = {
   fontWeight: 600,
 };
 
+// Panel chrome — every screen (loading/signed-out/error/real content) is
+// wrapped in this so the drag handle + close button are always present,
+// matching a real HUD window rather than a bare page.
+function Panel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        margin: 10,
+        height: "calc(100vh - 20px)",
+        borderRadius: 16,
+        background: "rgba(21,21,27,0.96)",
+        boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          // @ts-expect-error -- WebkitAppRegion is a real Electron/Chromium CSS extension, not in the TS DOM typings.
+          WebkitAppRegion: "drag",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 8px 10px 16px",
+          flexShrink: 0,
+        }}
+      >
+        <strong style={{ fontSize: 13, opacity: 0.85 }}>My Pet Companion</strong>
+        <button
+          onClick={() => window.close()}
+          style={{
+            // @ts-expect-error -- see above
+            WebkitAppRegion: "no-drag",
+            cursor: "pointer",
+            border: "none",
+            borderRadius: 6,
+            width: 26,
+            height: 26,
+            background: "rgba(255,255,255,0.1)",
+            color: "#fff",
+            fontSize: 13,
+          }}
+        >
+          ✕
+        </button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "0 20px 20px" }}>{children}</div>
+    </div>
+  );
+}
+
 function Centered({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -74,7 +133,7 @@ function Centered({ children }: { children: React.ReactNode }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        height: "100vh",
+        height: "100%",
         padding: 24,
         textAlign: "center",
         fontSize: 14,
@@ -118,17 +177,30 @@ export function StatsApp() {
     return () => clearInterval(id);
   }, [auth.userId, fetchRow]);
 
-  if (!auth.configured) return <Centered>Backend not configured.</Centered>;
-  if (auth.loading) return <Centered>Loading…</Centered>;
+  // Instant path: the overlay pushes its save on every change (same
+  // machine, no network) — this is what makes the HUD feel live instead of
+  // lagging behind the pet by several seconds.
+  useEffect(() => {
+    const off = window.overlay.onPetState((incoming) => {
+      setSave(incoming as PetSaveData);
+      setLoadedAt(new Date());
+    });
+    return off;
+  }, []);
+
+  if (!auth.configured) return <Panel><Centered>Backend not configured.</Centered></Panel>;
+  if (auth.loading) return <Panel><Centered>Loading…</Centered></Panel>;
   if (!auth.session) {
     return (
-      <Centered>
-        Sign in from the pet overlay first — this window mirrors your live pet
-        once you&apos;re signed in.
-      </Centered>
+      <Panel>
+        <Centered>
+          Sign in from the pet overlay first — this window mirrors your live pet
+          once you&apos;re signed in.
+        </Centered>
+      </Panel>
     );
   }
-  if (!save) return <Centered>{error ?? "Loading your pet…"}</Centered>;
+  if (!save) return <Panel><Centered>{error ?? "Loading your pet…"}</Centered></Panel>;
 
   const nextThreshold =
     save.evolutionStage >= 3 ? null : rules.evolutionThresholds[(save.evolutionStage + 1) as 1 | 2 | 3];
@@ -138,7 +210,7 @@ export function StatsApp() {
   );
 
   return (
-    <div style={{ padding: 20, maxWidth: 420, margin: "0 auto" }}>
+    <Panel>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h1 style={{ fontSize: 22, margin: 0 }}>{save.name}</h1>
         <span style={{ fontSize: 13, opacity: 0.6 }}>{STAGE_NAMES[save.evolutionStage]}</span>
@@ -217,6 +289,6 @@ export function StatsApp() {
           ""
         )}
       </div>
-    </div>
+    </Panel>
   );
 }

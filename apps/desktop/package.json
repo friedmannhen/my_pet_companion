@@ -51,7 +51,7 @@
           ]
         }
       ],
-      "artifactName": "MyPetCompanion-Setup-${version}.${ext}"
+      "artifactName": "MyPetCompanion-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,

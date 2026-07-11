@@ -108,6 +108,10 @@ export interface PetGame {
   rename: (name: string) => void;
   /** A friend petted this pet in an online room: small happiness bump, no care points (not farmable). */
   receiveSocialPet: () => void;
+  /** Call when a warm-hold ends — isEggOverheating otherwise only updates
+   * inside the 200ms warmTick loop, so releasing while still at 100 warmth
+   * would leave the red warning glow stuck on until the next hold session. */
+  clearOverheatWarning: () => void;
   /** Applies an online battle outcome: winner gains happiness + care points, loser sheds a little happiness. */
   applyBattleResult: (won: boolean) => void;
   /** Claim a claimable daily/weekly quest — awards its care-point reward. */
@@ -464,6 +468,11 @@ export function usePetGame(userId: string | null): PetGame {
     setSave((prev) => claimQuestReward(prev, code, rules, new Date(), calendar));
   }, []);
 
+  const clearOverheatWarning = useCallback(() => {
+    eggOverheatSinceRef.current = null;
+    setIsEggOverheating(false);
+  }, []);
+
   const canEvolveNow = canEvolveStage(save.carePoints, save.evolutionStage, rules);
 
   const hatchOrEvolve = useCallback(() => {
@@ -688,6 +697,7 @@ export function usePetGame(userId: string | null): PetGame {
     rename,
     receiveSocialPet,
     applyBattleResult,
+    clearOverheatWarning,
     claimQuest,
     claimableQuestCount: countClaimableQuests(save),
     achievements,

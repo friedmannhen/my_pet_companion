@@ -1152,17 +1152,14 @@ export function SideDock({
                         // self-trigger the throw at the grab point.
                         onClick={
                           canFeed && foodReady[i]
-                            ? (e) => {
-                                e.stopPropagation();
-                                onGrabFood(e, i);
-                              }
+                            ? (e) => onGrabFood(e, i)
                             : undefined
                         }
                         title={
                           !canFeed
                             ? "Not available right now"
                             : foodReady[i]
-                              ? "Click to grab, click again to throw"
+                              ? "Click to toss it to your pet"
                               : `Regrows in ${fmtEta(foodEtaMs[i] ?? 0)}`
                         }
                         style={{
@@ -1188,7 +1185,7 @@ export function SideDock({
                     ))}
                   </div>
                   <span style={{ fontSize: 11, opacity: 0.7 }}>
-                    {nextFoodEta > 0 ? `next 🍖 in ${fmtEta(nextFoodEta)}` : "Grab & throw"}
+                    {nextFoodEta > 0 ? `next 🍖 in ${fmtEta(nextFoodEta)}` : "Click to toss"}
                   </span>
                 </div>
 
@@ -1197,21 +1194,12 @@ export function SideDock({
                   <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span
                       draggable={false}
-                      // See the food pile note above — click to grab, click
-                      // again to throw.
-                      onClick={
-                        canPlayBall && ballReady
-                          ? (e) => {
-                              e.stopPropagation();
-                              onGrabBall(e);
-                            }
-                          : undefined
-                      }
+                      onClick={canPlayBall && ballReady ? (e) => onGrabBall(e) : undefined}
                       title={
                         !canPlayBall
                           ? "Not available right now"
                           : ballReady
-                            ? "Click to grab, click again to throw"
+                            ? "Click to play fetch"
                             : "The pet is playing with it"
                       }
                       style={{
@@ -1226,7 +1214,7 @@ export function SideDock({
                       ⚾
                     </span>
                   </div>
-                  <span style={{ fontSize: 11, opacity: 0.7 }}>{ballReady ? "Grab & throw" : "Out playing…"}</span>
+                  <span style={{ fontSize: 11, opacity: 0.7 }}>{ballReady ? "Click to fetch" : "Out playing…"}</span>
                 </div>
 
                 {/* The sponge — click to enter scrub mode. */}

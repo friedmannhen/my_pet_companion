@@ -401,11 +401,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const throwFood = useCallback(async () => {
     foodCanceledRef.current = false;
-    // Right-click/Esc cancel needs the whole window clickable/focusable —
-    // there's no cursor position tied to this sequence to hit-test against.
+    // Right-click cancel needs the whole window clickable — there's no
+    // cursor position tied to this sequence to hit-test against. NOT
+    // setFocusable: that calls overlay.focus() (real OS focus-steal), the
+    // exact thing that caused the original "background app freezes" bug —
+    // it's what actually broke this the last few rounds, not the click
+    // mechanics themselves. Escape-cancel is dropped for feed/ball as the
+    // trade-off; right-click still works with clickability alone.
     setClickableOverride(true);
     window.overlay.setClickable(true);
-    window.overlay.setFocusable(true);
     setFeedPhase("released");
     dbg("feed thrown");
     // try/finally: NOTHING may leave feedPhase stuck ≠ idle — petBusy would
@@ -450,7 +454,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       setFxTrigger(null);
       setFeedPhase("idle");
       setClickableOverride(false);
-      window.overlay.setFocusable(false);
     }
   }, [foodX, foodY, foodScale, foodRotate, foodOpacity, movement, game, sfx, dbg]);
   throwFoodRef.current = () => void throwFood();
@@ -464,19 +467,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   useEffect(() => {
     if (feedPhase === "idle") return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") cancelFeed();
-    };
+    // Right-click only — no Escape here (see throwFood's comment on why
+    // this doesn't grant OS focus).
     const onContext = (e: MouseEvent) => {
       e.preventDefault();
       cancelFeed();
     };
-    window.addEventListener("keydown", onKey);
     window.addEventListener("contextmenu", onContext);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("contextmenu", onContext);
-    };
+    return () => window.removeEventListener("contextmenu", onContext);
   }, [feedPhase, cancelFeed]);
 
   // ── Ball: same one-click fire-and-forget shape as food, then the pet
@@ -509,9 +507,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const runBallFetch = useCallback(async () => {
     ballCanceledRef.current = false;
+    // See throwFood's comment: right-click cancel only, deliberately no
+    // setFocusable (that OS focus-steal is what broke this repeatedly).
     setClickableOverride(true);
     window.overlay.setClickable(true);
-    window.overlay.setFocusable(true);
     setBallPhase("playing");
     dbg("ball thrown");
     // try/finally: the ball MUST return to its slot and ballPhase MUST reach
@@ -571,7 +570,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       consumables.returnBall();
       setBallPhase("idle");
       setClickableOverride(false);
-      window.overlay.setFocusable(false);
     }
   }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity, dbg]);
   runBallFetchRef.current = () => void runBallFetch();
@@ -585,19 +583,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   useEffect(() => {
     if (ballPhase === "idle") return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") cancelBall();
-    };
+    // Right-click only — see runBallFetch's comment.
     const onContext = (e: MouseEvent) => {
       e.preventDefault();
       cancelBall();
     };
-    window.addEventListener("keydown", onKey);
     window.addEventListener("contextmenu", onContext);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("contextmenu", onContext);
-    };
+    return () => window.removeEventListener("contextmenu", onContext);
   }, [ballPhase, cancelBall]);
 
   // ── Wash: hold sponge + scrub (entered from the SideDock's sponge) ──────
@@ -968,7 +960,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       >
         🍖
       </motion.div>
-      {feedPhase !== "idle" && <div style={bannerStyle}>🍖 Tossing food to your pet… (Esc or right-click to cancel)</div>}
+      {feedPhase !== "idle" && <div style={bannerStyle}>🍖 Tossing food to your pet… (right-click to cancel)</div>}
 
       {/* Ball — same always-mounted, motion-value-only pattern. */}
       <motion.div
@@ -988,7 +980,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       >
         ⚾
       </motion.div>
-      {ballPhase !== "idle" && <div style={bannerStyle}>⚾ Playing fetch… (Esc or right-click to cancel)</div>}
+      {ballPhase !== "idle" && <div style={bannerStyle}>⚾ Playing fetch… (right-click to cancel)</div>}
 
       {/* Wash: sponge cursor + progress + bubbles */}
       {cleaningMode && (

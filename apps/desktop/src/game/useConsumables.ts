@@ -5,7 +5,7 @@
 // restarts via localStorage; the ball intentionally does NOT persist — if
 // the app dies mid-fetch there's no sequence left to return it, so it's
 // simply back on next launch.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export const FOOD_SLOT_COUNT = 4;
 export const FOOD_RESPAWN_MS = 5 * 60 * 1000;
@@ -58,32 +58,48 @@ export function useConsumables(): Consumables {
     return () => clearInterval(id);
   }, []);
 
+  // Mirrors of the state above, read/written synchronously by
+  // takeFood/takeBall so their return value is trustworthy immediately —
+  // React's setState updaters (the previous approach: mutate a closure
+  // variable inside the updater, return it right after calling setState)
+  // only get invoked synchronously via an internal "eager bailout"
+  // optimization that isn't a guaranteed contract, and empirically doesn't
+  // fire reliably here (confirmed via browser testing: the state update DID
+  // land — the pile item faded and started its respawn timer — but the
+  // function's return value was `false` every time, so callers (grabFood/
+  // grabBall) always bailed out before starting the toss/fetch sequence,
+  // and for the ball specifically, before ever setting ballPhase, so
+  // there's no sequence left to cancel and returnBall() never runs).
+  const foodRespawnAtRef = useRef(foodRespawnAt);
+  const ballOutRef = useRef(ballOut);
+
   const takeFood = useCallback((slot: number): boolean => {
-    let taken = false;
-    setFoodRespawnAt((prev) => {
-      if (slot < 0 || slot >= prev.length || (prev[slot] ?? 0) > Date.now()) return prev;
-      taken = true;
-      const next = [...prev];
-      next[slot] = Date.now() + FOOD_RESPAWN_MS;
-      return next;
-    });
-    return taken;
+    const prev = foodRespawnAtRef.current;
+    if (slot < 0 || slot >= prev.length || (prev[slot] ?? 0) > Date.now()) return false;
+    const next = [...prev];
+    next[slot] = Date.now() + FOOD_RESPAWN_MS;
+    foodRespawnAtRef.current = next;
+    setFoodRespawnAt(next);
+    return true;
   }, []);
 
   const takeBall = useCallback((): boolean => {
-    let taken = false;
-    setBallOut((out) => {
-      if (out) return out;
-      taken = true;
-      return true;
-    });
-    return taken;
+    if (ballOutRef.current) return false;
+    ballOutRef.current = true;
+    setBallOut(true);
+    return true;
   }, []);
 
-  const returnBall = useCallback(() => setBallOut(false), []);
+  const returnBall = useCallback(() => {
+    ballOutRef.current = false;
+    setBallOut(false);
+  }, []);
 
   const resetAll = useCallback(() => {
-    setFoodRespawnAt(Array(FOOD_SLOT_COUNT).fill(0));
+    const fresh = Array(FOOD_SLOT_COUNT).fill(0);
+    foodRespawnAtRef.current = fresh;
+    ballOutRef.current = false;
+    setFoodRespawnAt(fresh);
     setBallOut(false);
   }, []);
 

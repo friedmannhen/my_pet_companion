@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PET_RULES,
+  applyCarePointPenalty,
   canEvolveStage,
   claimQuestReward,
   clampCarePointsForProgress,
@@ -362,7 +363,7 @@ export function usePetGame(userId: string | null): PetGame {
           // Still within the grace window — no gain, no penalty yet.
           return { ...prev, lastInteraction: nowIso };
         }
-        const nextPoints = clampCarePointsForProgress(prev, prev.carePoints - 0.5, rules);
+        const nextPoints = applyCarePointPenalty(prev.carePoints, 0.5);
         const next: PetSaveData = {
           ...prev,
           happiness: clampStat(prev.happiness - 1),
@@ -408,7 +409,7 @@ export function usePetGame(userId: string | null): PetGame {
       const nowIso = now.toISOString();
       const isEggPhase = prev.evolutionStage === 0;
       if (!isEggPhase && prev.hunger >= 100) {
-        const nextPoints = clampCarePointsForProgress(prev, prev.carePoints - 5, rules);
+        const nextPoints = applyCarePointPenalty(prev.carePoints, 5);
         let next: PetSaveData = {
           ...prev,
           happiness: clampStat(prev.happiness - 5),

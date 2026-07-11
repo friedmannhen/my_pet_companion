@@ -66,6 +66,18 @@ export function clampCarePointsForProgress(
   return boundary === null ? floored : Math.min(boundary, floored);
 }
 
+/**
+ * Deducts a deliberate misuse penalty (overfeeding, egg overheating) from
+ * care points. Deliberately does NOT go through clampCarePointsForProgress's
+ * carePointsFloor — that floor exists only to stop passive neglect decay
+ * from eating into points already spent on the current evolution stage; a
+ * penalty for an active bad action must actually bite even right after
+ * evolving/hatching (when points sit at/near that floor), or it's a no-op.
+ */
+export function applyCarePointPenalty(carePoints: number, amount: number): number {
+  return Math.max(0, carePoints - amount);
+}
+
 export interface DecayableStats {
   hunger: number;
   warmth: number;

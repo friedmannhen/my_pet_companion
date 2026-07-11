@@ -267,10 +267,10 @@ export interface SideDockProps {
   canFeed: boolean;
   foodReady: boolean[];
   foodEtaMs: number[];
-  onGrabFood: (e: React.MouseEvent, slot: number) => void;
+  onGrabFood: (e: React.PointerEvent, slot: number) => void;
   ballReady: boolean;
   canPlayBall: boolean;
-  onGrabBall: (e: React.MouseEvent) => void;
+  onGrabBall: (e: React.PointerEvent) => void;
   canClean: boolean;
   onStartClean: () => void;
   soundEnabled: boolean;
@@ -278,6 +278,9 @@ export interface SideDockProps {
   onRename: (name: string) => void;
   onSignOut: () => void;
   onQuit: () => void;
+  appVersion: string;
+  updateState: "idle" | "downloading" | "ready";
+  onInstallUpdate: () => void;
   groupsApi: UseGroups;
   /** Group id of the room we're currently in (null = offline). */
   activeRoomGroupId: string | null;
@@ -312,6 +315,9 @@ export function SideDock({
   onRename,
   onSignOut,
   onQuit,
+  appVersion,
+  updateState,
+  onInstallUpdate,
   groupsApi,
   activeRoomGroupId,
   canGoOnline,
@@ -1150,16 +1156,19 @@ export function SideDock({
                         // from also bubbling to the window "click" listener
                         // grabFood attaches, which would instantly
                         // self-trigger the throw at the grab point.
-                        onClick={
+                        onPointerDown={
                           canFeed && foodReady[i]
-                            ? (e) => onGrabFood(e, i)
+                            ? (e) => {
+                                if (e.button !== 0) return;
+                                onGrabFood(e, i);
+                              }
                             : undefined
                         }
                         title={
                           !canFeed
                             ? "Not available right now"
                             : foodReady[i]
-                              ? "Click to toss it to your pet"
+                              ? "Grab and drag to throw it to your pet"
                               : `Regrows in ${fmtEta(foodEtaMs[i] ?? 0)}`
                         }
                         style={{
@@ -1185,7 +1194,7 @@ export function SideDock({
                     ))}
                   </div>
                   <span style={{ fontSize: 11, opacity: 0.7 }}>
-                    {nextFoodEta > 0 ? `next 🍖 in ${fmtEta(nextFoodEta)}` : "Click to toss"}
+                    {nextFoodEta > 0 ? `next 🍖 in ${fmtEta(nextFoodEta)}` : "Drag to throw"}
                   </span>
                 </div>
 
@@ -1194,12 +1203,19 @@ export function SideDock({
                   <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span
                       draggable={false}
-                      onClick={canPlayBall && ballReady ? (e) => onGrabBall(e) : undefined}
+                      onPointerDown={
+                        canPlayBall && ballReady
+                          ? (e) => {
+                              if (e.button !== 0) return;
+                              onGrabBall(e);
+                            }
+                          : undefined
+                      }
                       title={
                         !canPlayBall
                           ? "Not available right now"
                           : ballReady
-                            ? "Click to play fetch"
+                            ? "Grab and drag to throw it"
                             : "The pet is playing with it"
                       }
                       style={{
@@ -1214,7 +1230,7 @@ export function SideDock({
                       ⚾
                     </span>
                   </div>
-                  <span style={{ fontSize: 11, opacity: 0.7 }}>{ballReady ? "Click to fetch" : "Out playing…"}</span>
+                  <span style={{ fontSize: 11, opacity: 0.7 }}>{ballReady ? "Drag to throw" : "Out playing…"}</span>
                 </div>
 
                 {/* The sponge — click to enter scrub mode. */}
@@ -1295,6 +1311,43 @@ export function SideDock({
             </section>
           </div>
         )}
+
+        {/* Persistent footer — outside the scrolling view content, so the
+            version stays visible no matter which tab is open, and an update
+            (once downloaded) is impossible to miss. */}
+        <div
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            padding: "6px 14px",
+            borderTop: "1px solid rgba(255,255,255,0.06)",
+          }}
+        >
+          <span style={{ fontSize: 10, opacity: 0.4 }}>{appVersion ? `v${appVersion}` : ""}</span>
+          {updateState === "ready" ? (
+            <button
+              onClick={onInstallUpdate}
+              title="A new version has finished downloading — click to restart and install it"
+              style={{
+                cursor: "pointer",
+                border: "none",
+                borderRadius: 6,
+                padding: "3px 9px",
+                fontSize: 10,
+                fontWeight: 700,
+                background: "#22c55e",
+                color: "#052e12",
+              }}
+            >
+              ⬆ Update ready — restart
+            </button>
+          ) : updateState === "downloading" ? (
+            <span style={{ fontSize: 10, opacity: 0.4 }}>Downloading update…</span>
+          ) : null}
+        </div>
       </div>
     </motion.div>
   );

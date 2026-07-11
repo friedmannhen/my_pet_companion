@@ -148,11 +148,25 @@ function fitOverlayToWorkArea(): void {
   overlay.setResizable(false);
 }
 
+export interface UpdateStatus {
+  state: "downloading" | "ready";
+  version: string;
+}
+
+function sendUpdateStatus(status: UpdateStatus): void {
+  if (!overlay || overlay.isDestroyed()) return;
+  overlay.webContents.send("overlay:update-status", status);
+}
+
 /**
- * Silent background auto-update (QA/beta distribution — plan follow-up).
- * Checks GitHub Releases on launch and again every 2h; downloads quietly
- * and installs on the NEXT app restart (never interrupts an active session
- * by force-quitting). No-ops entirely in `pnpm dev` (electron-updater
+ * Background auto-update, now with a visible in-app affordance (QA/beta
+ * distribution). Checks GitHub Releases on launch and again every 2h,
+ * downloads quietly in the background, then tells the renderer once it's
+ * ready so it can show a "restart to update" button instead of silently
+ * waiting for the next natural quit — a professional app shouldn't update
+ * itself with zero visibility. `autoInstallOnAppQuit` stays on as a
+ * fallback: even if the user ignores the button and just quits normally,
+ * the update still applies. No-ops entirely in `pnpm dev` (electron-updater
  * requires a packaged, signed-or-not installer build to have anything to
  * compare against — `app.isPackaged` is false for the dev/electron-vite run).
  */
@@ -162,8 +176,12 @@ function setupAutoUpdate(): void {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.logger = console;
 
+  autoUpdater.on("update-available", (info) => {
+    sendUpdateStatus({ state: "downloading", version: info.version });
+  });
   autoUpdater.on("update-downloaded", (info) => {
     console.log(`[update] ${info.version} downloaded — will install on next restart`);
+    sendUpdateStatus({ state: "ready", version: info.version });
   });
   autoUpdater.on("error", (err) => {
     console.error("[update] check/download failed:", err);
@@ -174,6 +192,11 @@ function setupAutoUpdate(): void {
     autoUpdater.checkForUpdates().catch((err) => console.error("[update] periodic check failed:", err));
   }, 2 * 3600_000);
 }
+
+ipcMain.handle("overlay:get-version", () => app.getVersion());
+// Lets the user click "restart to update" instead of waiting for the next
+// natural quit — quitAndInstall() is a no-op/harmless if nothing is ready yet.
+ipcMain.on("overlay:install-update", () => autoUpdater.quitAndInstall());
 
 app.whenReady().then(() => {
   createOverlay();

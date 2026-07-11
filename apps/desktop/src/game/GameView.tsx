@@ -12,7 +12,15 @@
 // usePetMovement.ts / PetOverlay.tsx / PetEffects.tsx — see those files'
 // history for the original reference implementation this was studied from.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, animate, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
+import {
+  AnimatePresence,
+  animate,
+  motion,
+  useDragControls,
+  useMotionValue,
+  useSpring,
+  useTransform,
+} from "framer-motion";
 import type { AuthState } from "../supabase/useAuth";
 import { usePetGame } from "./usePetGame";
 import { useSessionLease } from "../session/useSessionLease";
@@ -22,6 +30,7 @@ import { AdminPanel } from "./AdminPanel";
 import { RadialMenu, type RadialAction } from "./RadialMenu";
 import { SideDock } from "./SideDock";
 import { useRibbonPrefs } from "./useRibbonPrefs";
+import { useAppUpdate } from "./useAppUpdate";
 import { useConsumables } from "./useConsumables";
 import { useGamePrefs } from "./useGamePrefs";
 import { useGroups } from "./useGroups";
@@ -75,6 +84,48 @@ const bannerStyle: React.CSSProperties = {
 const THROW_EASE: [number, number, number, number] = [0.3, 0, 1, 1];
 const PET_COOLDOWN_MS = 5 * 60 * 1000;
 
+/**
+ * Ballistic arc flight for a thrown item: constant horizontal velocity +
+ * a gravity-shaped parabola for the vertical rise/fall (peaking at
+ * `arcHeight` above the straight line between start and end, at the
+ * midpoint of the flight), plus continuous spin. The progress driver runs
+ * on a plain linear tween — easing lives in the quadratic height formula
+ * itself (that's what makes it decelerate/accelerate like a real toss); an
+ * eased progress on top of that would double up and distort the arc.
+ */
+async function throwArc(opts: {
+  x: ReturnType<typeof useMotionValue<number>>;
+  y: ReturnType<typeof useMotionValue<number>>;
+  rotate: ReturnType<typeof useMotionValue<number>>;
+  scaleX: ReturnType<typeof useMotionValue<number>>;
+  scaleY: ReturnType<typeof useMotionValue<number>>;
+  toX: number;
+  toY: number;
+  arcHeight: number;
+  duration: number;
+  spinDegrees: number;
+}): Promise<void> {
+  const { x, y, rotate, scaleX, scaleY, toX, toY, arcHeight, duration, spinDegrees } = opts;
+  const fromX = x.get();
+  const fromY = y.get();
+  const fromRotate = rotate.get();
+  await animate(0, 1, {
+    duration,
+    ease: "linear",
+    onUpdate: (t) => {
+      x.set(fromX + (toX - fromX) * t);
+      // Parabola: 4*t*(1-t) peaks at 1 when t=0.5, zero at t=0 and t=1 —
+      // exactly an object leaving and returning to the flight line's height.
+      y.set(fromY + (toY - fromY) * t - arcHeight * 4 * t * (1 - t));
+      rotate.set(fromRotate + spinDegrees * t);
+      // A little "toward camera" pop at the apex sells the height.
+      const pop = 1 + 0.22 * 4 * t * (1 - t);
+      scaleX.set(pop);
+      scaleY.set(pop);
+    },
+  });
+}
+
 interface DeltaPopup {
   id: number;
   icon: string;
@@ -97,6 +148,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const { save } = game;
 
   const ribbon = useRibbonPrefs();
+  const appUpdate = useAppUpdate();
   const consumables = useConsumables();
   const prefs = useGamePrefs();
   const soundRef = useRef(prefs.soundEnabled);
@@ -118,8 +170,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, []);
   const [statsOpen, setStatsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [feedPhase, setFeedPhase] = useState<"idle" | "released" | "eating">("idle");
-  const [ballPhase, setBallPhase] = useState<"idle" | "playing">("idle");
+  const [feedPhase, setFeedPhase] = useState<"idle" | "held" | "released" | "eating">("idle");
+  const [ballPhase, setBallPhase] = useState<"idle" | "held" | "playing">("idle");
   const [isEvolving, setIsEvolving] = useState(false);
   const [cleaningMode, setCleaningMode] = useState(false);
   const [scrubHeld, setScrubHeld] = useState(false);
@@ -357,32 +409,51 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     if (game.isEgg && room.activeGroup) room.leaveRoom();
   }, [game.isEgg, room]);
 
-  // ── Feed & Ball: click once, it auto-tosses to a random spot ────────────
-  // NOT a grab-then-follow-the-cursor gesture. Several rounds of that design
-  // (press-hold-drag-release, then click-to-grab/click-to-throw) all proved
-  // unreliable in this click-through overlay — live testing kept landing on
-  // "click it, nothing attaches to the cursor, only the pile fades." The
-  // ball's OWN fire-and-forget fetch sequence (auto random landing point, no
-  // cursor tracking at all) was the one piece that consistently worked once
-  // triggered — so food now follows that exact same proven shape instead of
-  // trying to make cursor-tracking reliable. One click does the whole thing:
-  // take the item, toss it to a random spot, walk over, eat/fetch it.
-  // Cancelable via Esc or right-click while in flight, same as wash.
+  // ── Feed & Ball: real grab → drag → release-to-throw ────────────────────
+  // Earlier rounds of this exact gesture were unreliable, but the actual
+  // cause (found via live browser reproduction, see useConsumables.ts) was
+  // that takeFood/takeBall's synchronous return value was wrong — every
+  // grab silently bailed out before the throw sequence ever started, no
+  // matter how the gesture itself was built. With that fixed, real drag
+  // physics is back, using the same handoff pattern as the pet's own proven
+  // drag-throw (usePetMovement.ts): a `useDragControls` instance lets the
+  // pile icon's pointerdown hand off an already-in-progress drag session to
+  // the always-mounted floating food element (dragListener=false so it only
+  // starts via that explicit `.start()` call, never its own pointerdown) —
+  // this avoids the earlier "cross-element drag handoff" distrust, since
+  // the floating element IS the thing that's actually dragged throughout.
+  // A near-zero release velocity (a plain click, or a tiny nudge) still
+  // gracefully falls back to an auto-toss in a random nearby direction.
   const foodX = useMotionValue(0);
   const foodY = useMotionValue(0);
-  const foodScale = useMotionValue(1);
+  const foodScaleX = useMotionValue(1);
+  const foodScaleY = useMotionValue(1);
   const foodRotate = useMotionValue(0);
   const foodOpacity = useMotionValue(0);
   const foodCanceledRef = useRef(false);
+  const foodDragControls = useDragControls();
+  const foodVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
+  // framer-motion's onDragEnd never fires for a press+release with zero
+  // pointer movement in between (confirmed via live testing: a plain click
+  // left the sequence permanently stuck in "held", which cascades into
+  // petBusy=true forever — the exact "everything dead" deadlock reported
+  // historically). This native listener is the release trigger of record;
+  // onDragEnd is a secondary path for real drags. foodReleasedRef makes
+  // whichever fires first win and the other a no-op. Attached synchronously
+  // inside grabFood (not a useEffect) — a useEffect-based listener can lose
+  // the race against a very fast click completing before the effect commits
+  // (this exact race was a real, previously-fixed bug in an earlier round).
+  const foodReleasedRef = useRef(false);
+  const foodUpListenerRef = useRef<(() => void) | null>(null);
 
   const canFeed = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
   const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
   const canClean = save.isAlive && !save.isSleeping && save.cleanliness < 100 && !petBusy;
 
-  const throwFoodRef = useRef<() => void>(() => {});
+  const throwFoodRef = useRef<(vx: number, vy: number) => void>(() => {});
 
   const grabFood = useCallback(
-    (_e: React.MouseEvent, slot: number) => {
+    (e: React.PointerEvent, slot: number) => {
       if (!canFeed) {
         dbg(`feed blocked (busy=${petBusy} sleep=${save.isSleeping} egg=${game.isEgg})`);
         return;
@@ -394,74 +465,171 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       dbg(`feed: took slot ${slot}`);
       setStatsOpen(false);
       setMenuOpen(false);
-      throwFoodRef.current();
+      foodCanceledRef.current = false;
+      foodReleasedRef.current = false;
+      // The whole window needs to accept mouse input for the drag to track
+      // across the entire screen, not just while over the (normally
+      // click-through) pile icon. NOT setFocusable: overlay.focus() is a
+      // real OS focus-steal — the documented cause of the old "background
+      // app freezes" bug — clickability alone is enough for dragging.
+      setClickableOverride(true);
+      window.overlay.setClickable(true);
+      const px = e.clientX - 20;
+      const py = e.clientY - 20;
+      foodX.set(px);
+      foodY.set(py);
+      foodScaleX.set(1);
+      foodScaleY.set(1);
+      foodRotate.set(0);
+      foodOpacity.set(1);
+      foodVelRef.current = { vx: 0, vy: 0, lastX: px, lastY: py, lastT: performance.now() };
+      setFeedPhase("held");
+      foodDragControls.start(e);
+
+      const onNativeUp = () => {
+        if (foodReleasedRef.current) return;
+        foodReleasedRef.current = true;
+        window.removeEventListener("pointerup", onNativeUp);
+        foodUpListenerRef.current = null;
+        throwFoodRef.current(foodVelRef.current.vx, foodVelRef.current.vy);
+      };
+      foodUpListenerRef.current = onNativeUp;
+      window.addEventListener("pointerup", onNativeUp);
     },
-    [canFeed, consumables, dbg, petBusy, save.isSleeping, game.isEgg],
+    [canFeed, consumables, dbg, petBusy, save.isSleeping, game.isEgg, foodDragControls, foodX, foodY, foodScaleX, foodScaleY, foodRotate, foodOpacity],
   );
 
-  const throwFood = useCallback(async () => {
-    foodCanceledRef.current = false;
-    // Right-click cancel needs the whole window clickable — there's no
-    // cursor position tied to this sequence to hit-test against. NOT
-    // setFocusable: that calls overlay.focus() (real OS focus-steal), the
-    // exact thing that caused the original "background app freezes" bug —
-    // it's what actually broke this the last few rounds, not the click
-    // mechanics themselves. Escape-cancel is dropped for feed/ball as the
-    // trade-off; right-click still works with clickability alone.
-    setClickableOverride(true);
-    window.overlay.setClickable(true);
-    setFeedPhase("released");
-    dbg("feed thrown");
-    // try/finally: NOTHING may leave feedPhase stuck ≠ idle — petBusy would
-    // lock every later grab/menu forever (that exact deadlock is what made
-    // "worked once, then nothing works" happen previously).
-    try {
-      const landX = 60 + Math.random() * (window.innerWidth - 180);
-      const landY = 100 + Math.random() * (window.innerHeight * 0.5);
-      foodX.set(landX - 20);
-      foodY.set(landY - 170);
-      foodScale.set(0.85);
-      foodRotate.set(-14);
-      foodOpacity.set(1);
-
-      await Promise.all([
-        animate(foodY, landY - 20, { type: "spring", stiffness: 90, damping: 16 }),
-        animate(foodScale, 1, { duration: 0.4 }),
-        animate(foodRotate, 12, { duration: 0.4 }),
-      ]);
-      await animate(foodY, landY - 34, { duration: 0.12, ease: "easeOut" });
-      await animate(foodY, landY - 20, { duration: 0.1, ease: "easeIn" });
-
-      if (foodCanceledRef.current) return;
-      await movement.walkTo(landX - 44, landY - 88);
-      if (foodCanceledRef.current) return;
-
-      setFeedPhase("eating");
-      const wasOverfed = !game.isEgg && game.save.hunger >= 100;
-      setFxTrigger(wasOverfed ? "overfed" : "eat");
-      sfx(Sounds.playNom);
-      expectDeltaRef.current = true;
-      game.feed();
-      dbg("feed eaten");
-      await new Promise((r) => setTimeout(r, 450));
-      await animate(foodScale, 0, { duration: 0.3, ease: "easeIn" });
-    } catch (err) {
-      console.error("[feed] sequence failed:", err);
-      dbg(`feed FAILED: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      foodOpacity.set(0);
-      foodScale.set(1);
-      setFxTrigger(null);
-      setFeedPhase("idle");
-      setClickableOverride(false);
+  const onFoodDrag = useCallback(() => {
+    const now = performance.now();
+    const ref = foodVelRef.current;
+    const dt = now - ref.lastT;
+    if (dt > 0 && dt < 100) {
+      ref.vx = ((foodX.get() - ref.lastX) / dt) * 1000;
+      ref.vy = ((foodY.get() - ref.lastY) / dt) * 1000;
     }
-  }, [foodX, foodY, foodScale, foodRotate, foodOpacity, movement, game, sfx, dbg]);
-  throwFoodRef.current = () => void throwFood();
+    ref.lastX = foodX.get();
+    ref.lastY = foodY.get();
+    ref.lastT = now;
+  }, [foodX, foodY]);
+
+  const onFoodDragEnd = useCallback(() => {
+    if (foodReleasedRef.current) return;
+    foodReleasedRef.current = true;
+    if (foodUpListenerRef.current) {
+      window.removeEventListener("pointerup", foodUpListenerRef.current);
+      foodUpListenerRef.current = null;
+    }
+    throwFoodRef.current(foodVelRef.current.vx, foodVelRef.current.vy);
+  }, []);
+
+  const throwFood = useCallback(
+    async (vx: number, vy: number) => {
+      setFeedPhase("released");
+      dbg("feed thrown");
+      // try/finally: NOTHING may leave feedPhase stuck ≠ idle — petBusy
+      // would lock every later grab/menu forever (that exact deadlock is
+      // what made "worked once, then nothing works" happen previously).
+      try {
+        const GLIDE = 0.35;
+        const speed = Math.hypot(vx, vy);
+        let landX: number;
+        let landY: number;
+        if (speed < 60) {
+          // Barely-moved release (a plain click) — still toss it somewhere
+          // nearby rather than requiring a real flick every time.
+          const ang = Math.random() * Math.PI * 2;
+          landX = foodX.get() + Math.cos(ang) * 90;
+          landY = foodY.get() + Math.sin(ang) * 90;
+        } else {
+          landX = foodX.get() + vx * GLIDE;
+          landY = foodY.get() + vy * GLIDE;
+        }
+        landX = Math.min(Math.max(landX, 20), window.innerWidth - 60);
+        landY = Math.min(Math.max(landY, 60), window.innerHeight - 100);
+
+        const dist = Math.hypot(landX - foodX.get(), landY - foodY.get());
+        await throwArc({
+          x: foodX,
+          y: foodY,
+          rotate: foodRotate,
+          scaleX: foodScaleX,
+          scaleY: foodScaleY,
+          toX: landX,
+          toY: landY,
+          arcHeight: Math.min(200, Math.max(50, dist * 0.5)),
+          duration: Math.min(0.85, Math.max(0.3, dist / 1100)),
+          spinDegrees: 320 + Math.random() * 280 + Math.min(300, speed * 0.12),
+        });
+        // Landing bounce with a small squash-and-stretch: squash flat on
+        // impact, stretch tall as the bounce carries it back up, squash
+        // again on the second touchdown, then settle to normal size.
+        foodScaleX.set(1.18);
+        foodScaleY.set(0.85);
+        await Promise.all([
+          animate(foodY, landY - 14, { duration: 0.12, ease: "easeOut" }),
+          animate(foodScaleX, 0.9, { duration: 0.12, ease: "easeOut" }),
+          animate(foodScaleY, 1.14, { duration: 0.12, ease: "easeOut" }),
+        ]);
+        await Promise.all([
+          animate(foodY, landY, { duration: 0.1, ease: "easeIn" }),
+          animate(foodScaleX, 1.12, { duration: 0.1, ease: "easeIn" }),
+          animate(foodScaleY, 0.88, { duration: 0.1, ease: "easeIn" }),
+        ]);
+        await Promise.all([
+          animate(foodScaleX, 1, { duration: 0.16, ease: "easeOut" }),
+          animate(foodScaleY, 1, { duration: 0.16, ease: "easeOut" }),
+        ]);
+
+        if (foodCanceledRef.current) return;
+        await movement.walkTo(landX - 24, landY - 48);
+        if (foodCanceledRef.current) return;
+
+        setFeedPhase("eating");
+        const wasOverfed = !game.isEgg && game.save.hunger >= 100;
+        setFxTrigger(wasOverfed ? "overfed" : "eat");
+        sfx(Sounds.playNom);
+        expectDeltaRef.current = true;
+        game.feed();
+        dbg("feed eaten");
+        await new Promise((r) => setTimeout(r, 450));
+        await Promise.all([
+          animate(foodScaleX, 0, { duration: 0.3, ease: "easeIn" }),
+          animate(foodScaleY, 0, { duration: 0.3, ease: "easeIn" }),
+        ]);
+      } catch (err) {
+        console.error("[feed] sequence failed:", err);
+        dbg(`feed FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        foodOpacity.set(0);
+        foodScaleX.set(1);
+        foodScaleY.set(1);
+        setFxTrigger(null);
+        setFeedPhase("idle");
+        setClickableOverride(false);
+        window.overlay.setClickable(false);
+      }
+    },
+    [foodX, foodY, foodScaleX, foodScaleY, foodRotate, foodOpacity, movement, game, sfx, dbg],
+  );
+  throwFoodRef.current = (vx, vy) => void throwFood(vx, vy);
 
   const cancelFeed = useCallback(() => {
     if (feedPhase === "idle") return;
     foodCanceledRef.current = true;
     foodOpacity.set(0);
+    if (feedPhase === "held") {
+      // Never reached throwFood, so its finally never runs — clean up here.
+      // Also block the still-pending native pointerup listener (and
+      // framer's onDragEnd) from firing a throw after the fact.
+      foodReleasedRef.current = true;
+      if (foodUpListenerRef.current) {
+        window.removeEventListener("pointerup", foodUpListenerRef.current);
+        foodUpListenerRef.current = null;
+      }
+      setFeedPhase("idle");
+      setClickableOverride(false);
+      window.overlay.setClickable(false);
+    }
     dbg("feed canceled");
   }, [feedPhase, foodOpacity, dbg]);
 
@@ -477,18 +645,27 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     return () => window.removeEventListener("contextmenu", onContext);
   }, [feedPhase, cancelFeed]);
 
-  // ── Ball: same one-click fire-and-forget shape as food, then the pet
-  // fetches it and throws it back at the screen (QA-hub style flourish).
+  // ── Ball: same grab → drag → release-to-throw as food for the initial
+  // toss; the fetch-and-throw-back-at-the-screen flourish afterward stays a
+  // fully automatic sequence (the pet's own action, not user-dragged).
   const ballX = useMotionValue(0);
   const ballY = useMotionValue(0);
-  const ballScale = useMotionValue(0);
+  const ballScaleX = useMotionValue(0);
+  const ballScaleY = useMotionValue(0);
   const ballRotate = useMotionValue(0);
   const ballOpacity = useMotionValue(0);
   const ballCanceledRef = useRef(false);
-  const runBallFetchRef = useRef<() => void>(() => {});
+  const ballDragControls = useDragControls();
+  const ballVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
+  // See foodReleasedRef's comment: framer-motion's onDragEnd never fires for
+  // a zero-movement press+release, so a native pointerup listener (attached
+  // synchronously, not via useEffect) is the release trigger of record.
+  const ballReleasedRef = useRef(false);
+  const ballUpListenerRef = useRef<(() => void) | null>(null);
+  const runBallFetchRef = useRef<(vx: number, vy: number) => void>(() => {});
 
   const grabBall = useCallback(
-    (_e: React.MouseEvent) => {
+    (e: React.PointerEvent) => {
       if (!canPlayBall) {
         dbg(`ball blocked (busy=${petBusy} sleep=${save.isSleeping} egg=${game.isEgg})`);
         return;
@@ -500,86 +677,182 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       dbg("ball: taken");
       setStatsOpen(false);
       setMenuOpen(false);
-      runBallFetchRef.current();
-    },
-    [canPlayBall, consumables, dbg, petBusy, save.isSleeping, game.isEgg],
-  );
-
-  const runBallFetch = useCallback(async () => {
-    ballCanceledRef.current = false;
-    // See throwFood's comment: right-click cancel only, deliberately no
-    // setFocusable (that OS focus-steal is what broke this repeatedly).
-    setClickableOverride(true);
-    window.overlay.setClickable(true);
-    setBallPhase("playing");
-    dbg("ball thrown");
-    // try/finally: the ball MUST return to its slot and ballPhase MUST reach
-    // idle no matter what fails mid-sequence — a stuck "playing" is exactly
-    // the "Out playing… forever, everything dead" lockup reported live.
-    try {
-      const landX = 60 + Math.random() * (window.innerWidth - 180);
-      const landY = 80 + Math.random() * (window.innerHeight * 0.55);
-      ballX.set(landX);
-      ballY.set(-60);
-      ballScale.set(0.5);
+      ballCanceledRef.current = false;
+      ballReleasedRef.current = false;
+      setClickableOverride(true);
+      window.overlay.setClickable(true);
+      const px = e.clientX - 17;
+      const py = e.clientY - 17;
+      ballX.set(px);
+      ballY.set(py);
+      ballScaleX.set(1);
+      ballScaleY.set(1);
       ballRotate.set(0);
       ballOpacity.set(1);
+      ballVelRef.current = { vx: 0, vy: 0, lastX: px, lastY: py, lastT: performance.now() };
+      setBallPhase("held");
+      ballDragControls.start(e);
 
-      // Flight: fall + spin to the landing spot.
-      await Promise.all([
-        animate(ballY, landY, { duration: 0.72, ease: THROW_EASE }),
-        animate(ballRotate, 540, { duration: 0.72, ease: THROW_EASE }),
-        animate(ballScale, 1, { duration: 0.72, ease: THROW_EASE }),
-      ]);
-      // Gravity bounce (2 diminishing hops).
-      await animate(ballY, landY - 24, { duration: 0.16, ease: "easeOut" });
-      await animate(ballY, landY, { duration: 0.13, ease: "easeIn" });
-      await animate(ballY, landY - 10, { duration: 0.1, ease: "easeOut" });
-      await animate(ballY, landY, { duration: 0.09, ease: "easeIn" });
+      const onNativeUp = () => {
+        if (ballReleasedRef.current) return;
+        ballReleasedRef.current = true;
+        window.removeEventListener("pointerup", onNativeUp);
+        ballUpListenerRef.current = null;
+        runBallFetchRef.current(ballVelRef.current.vx, ballVelRef.current.vy);
+      };
+      ballUpListenerRef.current = onNativeUp;
+      window.addEventListener("pointerup", onNativeUp);
+    },
+    [canPlayBall, consumables, dbg, petBusy, save.isSleeping, game.isEgg, ballDragControls, ballX, ballY, ballScaleX, ballScaleY, ballRotate, ballOpacity],
+  );
 
-      if (ballCanceledRef.current) return;
-      // Pet runs to the ball.
-      await movement.walkTo(landX - 44, landY - 88);
-      if (ballCanceledRef.current) return;
-
-      // Grab: ball snaps to the pet with a quick bounce.
-      expectDeltaRef.current = true;
-      game.throwBall();
-      pulseHappy();
-      dbg("ball fetched");
-      ballX.set(movement.x.get() + 40);
-      ballY.set(movement.y.get() + 15);
-      await animate(ballScale, 1.5, { duration: 0.08 });
-      await animate(ballScale, 1, { duration: 0.1 });
-
-      // Throw back at the screen: grows toward center then fades.
-      await Promise.all([
-        animate(ballX, window.innerWidth / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
-        animate(ballY, window.innerHeight / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
-        animate(ballScale, 16, { duration: 0.65, ease: THROW_EASE }),
-        animate(ballOpacity, 0, { duration: 0.65, ease: THROW_EASE }),
-      ]);
-    } catch (err) {
-      console.error("[ball] sequence failed:", err);
-      dbg(`ball FAILED: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      ballOpacity.set(0);
-      ballScale.set(0);
-      ballX.set(-200);
-      ballY.set(-200);
-      consumables.returnBall();
-      setBallPhase("idle");
-      setClickableOverride(false);
+  const onBallDrag = useCallback(() => {
+    const now = performance.now();
+    const ref = ballVelRef.current;
+    const dt = now - ref.lastT;
+    if (dt > 0 && dt < 100) {
+      ref.vx = ((ballX.get() - ref.lastX) / dt) * 1000;
+      ref.vy = ((ballY.get() - ref.lastY) / dt) * 1000;
     }
-  }, [movement, game, pulseHappy, consumables, ballX, ballY, ballScale, ballRotate, ballOpacity, dbg]);
-  runBallFetchRef.current = () => void runBallFetch();
+    ref.lastX = ballX.get();
+    ref.lastY = ballY.get();
+    ref.lastT = now;
+  }, [ballX, ballY]);
+
+  const onBallDragEnd = useCallback(() => {
+    if (ballReleasedRef.current) return;
+    ballReleasedRef.current = true;
+    if (ballUpListenerRef.current) {
+      window.removeEventListener("pointerup", ballUpListenerRef.current);
+      ballUpListenerRef.current = null;
+    }
+    runBallFetchRef.current(ballVelRef.current.vx, ballVelRef.current.vy);
+  }, []);
+
+  const runBallFetch = useCallback(
+    async (vx: number, vy: number) => {
+      setBallPhase("playing");
+      dbg("ball thrown");
+      // try/finally: the ball MUST return to its slot and ballPhase MUST
+      // reach idle no matter what fails mid-sequence — a stuck "playing" is
+      // exactly the "Out playing… forever, everything dead" lockup reported
+      // live.
+      try {
+        const GLIDE = 0.35;
+        const speed = Math.hypot(vx, vy);
+        let landX: number;
+        let landY: number;
+        if (speed < 60) {
+          const ang = Math.random() * Math.PI * 2;
+          landX = ballX.get() + Math.cos(ang) * 100;
+          landY = ballY.get() + Math.sin(ang) * 100;
+        } else {
+          landX = ballX.get() + vx * GLIDE;
+          landY = ballY.get() + vy * GLIDE;
+        }
+        landX = Math.min(Math.max(landX, 20), window.innerWidth - 60);
+        landY = Math.min(Math.max(landY, 60), window.innerHeight - 100);
+
+        // Flight: ballistic arc + spin to the landing spot, driven by release velocity.
+        const dist = Math.hypot(landX - ballX.get(), landY - ballY.get());
+        await throwArc({
+          x: ballX,
+          y: ballY,
+          rotate: ballRotate,
+          scaleX: ballScaleX,
+          scaleY: ballScaleY,
+          toX: landX,
+          toY: landY,
+          arcHeight: Math.min(220, Math.max(55, dist * 0.55)),
+          duration: Math.min(0.9, Math.max(0.32, dist / 1050)),
+          spinDegrees: 380 + Math.random() * 340 + Math.min(340, speed * 0.14),
+        });
+        // Gravity bounce (2 diminishing hops) with matching squash-and-
+        // stretch, tapering down with the bounce height.
+        ballScaleX.set(1.2);
+        ballScaleY.set(0.82);
+        await Promise.all([
+          animate(ballY, landY - 24, { duration: 0.16, ease: "easeOut" }),
+          animate(ballScaleX, 0.9, { duration: 0.16, ease: "easeOut" }),
+          animate(ballScaleY, 1.14, { duration: 0.16, ease: "easeOut" }),
+        ]);
+        await Promise.all([
+          animate(ballY, landY, { duration: 0.13, ease: "easeIn" }),
+          animate(ballScaleX, 1.12, { duration: 0.13, ease: "easeIn" }),
+          animate(ballScaleY, 0.9, { duration: 0.13, ease: "easeIn" }),
+        ]);
+        await Promise.all([
+          animate(ballY, landY - 10, { duration: 0.1, ease: "easeOut" }),
+          animate(ballScaleX, 0.96, { duration: 0.1, ease: "easeOut" }),
+          animate(ballScaleY, 1.06, { duration: 0.1, ease: "easeOut" }),
+        ]);
+        await Promise.all([
+          animate(ballY, landY, { duration: 0.09, ease: "easeIn" }),
+          animate(ballScaleX, 1, { duration: 0.12, ease: "easeOut" }),
+          animate(ballScaleY, 1, { duration: 0.12, ease: "easeOut" }),
+        ]);
+
+        if (ballCanceledRef.current) return;
+        // Pet runs to the ball.
+        await movement.walkTo(landX - 24, landY - 48);
+        if (ballCanceledRef.current) return;
+
+        // Grab: ball snaps to the pet with a quick bounce.
+        expectDeltaRef.current = true;
+        game.throwBall();
+        pulseHappy();
+        dbg("ball fetched");
+        ballX.set(movement.x.get() + 40);
+        ballY.set(movement.y.get() + 15);
+        await Promise.all([animate(ballScaleX, 1.5, { duration: 0.08 }), animate(ballScaleY, 1.5, { duration: 0.08 })]);
+        await Promise.all([animate(ballScaleX, 1, { duration: 0.1 }), animate(ballScaleY, 1, { duration: 0.1 })]);
+
+        // Throw back at the screen: grows toward center then fades.
+        await Promise.all([
+          animate(ballX, window.innerWidth / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
+          animate(ballY, window.innerHeight / 2 - 32, { duration: 0.65, ease: THROW_EASE }),
+          animate(ballScaleX, 16, { duration: 0.65, ease: THROW_EASE }),
+          animate(ballScaleY, 16, { duration: 0.65, ease: THROW_EASE }),
+          animate(ballOpacity, 0, { duration: 0.65, ease: THROW_EASE }),
+        ]);
+      } catch (err) {
+        console.error("[ball] sequence failed:", err);
+        dbg(`ball FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        ballOpacity.set(0);
+        ballScaleX.set(0);
+        ballScaleY.set(0);
+        ballX.set(-200);
+        ballY.set(-200);
+        consumables.returnBall();
+        setBallPhase("idle");
+        setClickableOverride(false);
+        window.overlay.setClickable(false);
+      }
+    },
+    [movement, game, pulseHappy, consumables, ballX, ballY, ballScaleX, ballScaleY, ballRotate, ballOpacity, dbg],
+  );
+  runBallFetchRef.current = (vx, vy) => void runBallFetch(vx, vy);
 
   const cancelBall = useCallback(() => {
     if (ballPhase === "idle") return;
     ballCanceledRef.current = true;
     ballOpacity.set(0);
+    if (ballPhase === "held") {
+      // Never reached runBallFetch, so its finally never runs — clean up
+      // here, including giving the ball back (runBallFetch would have).
+      ballReleasedRef.current = true;
+      if (ballUpListenerRef.current) {
+        window.removeEventListener("pointerup", ballUpListenerRef.current);
+        ballUpListenerRef.current = null;
+      }
+      setBallPhase("idle");
+      setClickableOverride(false);
+      window.overlay.setClickable(false);
+      consumables.returnBall();
+    }
     dbg("ball canceled");
-  }, [ballPhase, ballOpacity, dbg]);
+  }, [ballPhase, ballOpacity, dbg, consumables]);
 
   useEffect(() => {
     if (ballPhase === "idle") return;
@@ -926,6 +1199,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onRename={game.rename}
         onSignOut={auth.signOut}
         onQuit={() => window.overlay.quit()}
+        appVersion={appUpdate.version}
+        updateState={appUpdate.updateState}
+        onInstallUpdate={appUpdate.installUpdate}
         groupsApi={groupsApi}
         activeRoomGroupId={room.activeGroup?.id ?? null}
         canGoOnline={!game.isEgg && save.isAlive}
@@ -944,6 +1220,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       {/* Food — always mounted, positioned purely via foodX/foodY motion
           values animated by throwFood. No pointer events of its own. */}
       <motion.div
+        drag
+        dragControls={foodDragControls}
+        dragListener={false}
+        dragMomentum={false}
+        dragElastic={0}
+        onDrag={onFoodDrag}
+        onDragEnd={onFoodDragEnd}
         style={{
           position: "fixed",
           left: 0,
@@ -952,35 +1235,60 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           zIndex: 26000,
           x: foodX,
           y: foodY,
-          scale: foodScale,
+          scaleX: foodScaleX,
+          scaleY: foodScaleY,
           rotate: foodRotate,
           opacity: foodOpacity,
-          pointerEvents: "none",
+          pointerEvents: feedPhase === "held" ? "auto" : "none",
+          cursor: feedPhase === "held" ? "grabbing" : "default",
+          touchAction: "none",
         }}
       >
         🍖
       </motion.div>
-      {feedPhase !== "idle" && <div style={bannerStyle}>🍖 Tossing food to your pet… (right-click to cancel)</div>}
+      {feedPhase !== "idle" && (
+        <div style={bannerStyle}>
+          {feedPhase === "held"
+            ? "🍖 Drag it, then let go to throw! (right-click to cancel)"
+            : "🍖 Tossing food to your pet… (right-click to cancel)"}
+        </div>
+      )}
 
-      {/* Ball — same always-mounted, motion-value-only pattern. */}
+      {/* Ball — same always-mounted, drag-controlled pattern as food. */}
       <motion.div
+        drag
+        dragControls={ballDragControls}
+        dragListener={false}
+        dragMomentum={false}
+        dragElastic={0}
+        onDrag={onBallDrag}
+        onDragEnd={onBallDragEnd}
         style={{
           position: "fixed",
           left: 0,
           top: 0,
           fontSize: 34,
           zIndex: 26000,
-          pointerEvents: "none",
+          pointerEvents: ballPhase === "held" ? "auto" : "none",
+          cursor: ballPhase === "held" ? "grabbing" : "default",
+          touchAction: "none",
           x: ballX,
           y: ballY,
-          scale: ballScale,
+          scaleX: ballScaleX,
+          scaleY: ballScaleY,
           rotate: ballRotate,
           opacity: ballOpacity,
         }}
       >
         ⚾
       </motion.div>
-      {ballPhase !== "idle" && <div style={bannerStyle}>⚾ Playing fetch… (right-click to cancel)</div>}
+      {ballPhase !== "idle" && (
+        <div style={bannerStyle}>
+          {ballPhase === "held"
+            ? "⚾ Drag it, then let go to throw! (right-click to cancel)"
+            : "⚾ Playing fetch… (right-click to cancel)"}
+        </div>
+      )}
 
       {/* Wash: sponge cursor + progress + bubbles */}
       {cleaningMode && (

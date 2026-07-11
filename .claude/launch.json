@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pet-browser-debug",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@pet/desktop", "exec", "vite", "--config", "vite.browser.config.ts"],
+      "port": 5183
+    }
+  ]
+}

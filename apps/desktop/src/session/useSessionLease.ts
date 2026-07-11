@@ -2,10 +2,21 @@
 // user on sign-in, heartbeats it while active, and releases on clean close.
 // A conflict is surfaced (never auto-resolved) — the player explicitly
 // chooses to force takeover, per the plan's recommended default.
+//
+// Two distinct situations both used to collapse into one "conflict" status,
+// which is why force-takeover looked like a no-op from the ousted device's
+// point of view: nothing there ever told it "you were just kicked," it just
+// showed the same "take over" button the *other* (new) device sees when
+// blocked at acquire time. Kept as separate statuses on purpose:
+//   - "conflict": this device tried to acquire and another was already
+//     active — the player can force takeover to claim it.
+//   - "kicked": this device WAS the active one and lost the lease (another
+//     device forced takeover) — surfaced distinctly so the UI can make it
+//     unmistakable this session got booted, not just offer a generic button.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "../supabase/client";
 
-export type LeaseStatus = "idle" | "acquiring" | "active" | "conflict" | "error";
+export type LeaseStatus = "idle" | "acquiring" | "active" | "conflict" | "kicked" | "error";
 
 export interface LeaseConflict {
   deviceType: string;
@@ -77,7 +88,10 @@ export function useSessionLease(userId: string | null): SessionLease {
         try {
           const res = await callFn("heartbeat-session", { sessionId: sessionIdRef.current });
           if (!res.ok) {
-            setStatus("conflict");
+            // This device WAS the active one and just lost the lease to a
+            // takeover elsewhere — distinct from "conflict" (blocked at
+            // acquire time), so the UI can make it unmistakable.
+            setStatus("kicked");
             setConflict({ deviceType: "another device", acquiredAt: new Date().toISOString() });
           }
         } catch {

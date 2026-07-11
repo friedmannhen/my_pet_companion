@@ -192,7 +192,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // scrubbing, evolving) sets this.
   const petBusy = cleaningMode || feedPhase !== "idle" || ballPhase !== "idle" || isEvolving;
 
-  const stationary = save.isSleeping || !save.isAlive || game.isEgg;
+  // Freeze wandering while a takeover elsewhere just kicked this device off
+  // its lease — a visible behavior change (not just a buried settings
+  // button) so it's unmistakable this session lost ownership.
+  const stationary = save.isSleeping || !save.isAlive || game.isEgg || lease.status === "kicked";
   const movement = usePetMovement({
     active: !stationary && !menuOpen && !petBusy,
   });
@@ -1246,6 +1249,11 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       >
         🍖
       </motion.div>
+      {lease.status === "kicked" && (
+        <div style={{ ...bannerStyle, top: 24, background: "rgba(127,29,29,0.92)", color: "#fecaca" }}>
+          🔒 Signed in on another device — this session was disconnected. Open Settings to reconnect here.
+        </div>
+      )}
       {feedPhase !== "idle" && (
         <div style={bannerStyle}>
           {feedPhase === "held"

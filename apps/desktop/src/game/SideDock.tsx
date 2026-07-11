@@ -729,6 +729,15 @@ export function SideDock({
                     ⚠️ Take over this device
                   </button>
                 )}
+                {lease.status === "kicked" && (
+                  <button
+                    style={{ ...chipStyle, background: "rgba(127,29,29,0.6)", textAlign: "left" }}
+                    onClick={lease.forceTakeover}
+                    title="Your account signed in elsewhere and this device was disconnected. Click to reconnect here — it will disconnect that other device instead."
+                  >
+                    🔒 Disconnected — click to reconnect here
+                  </button>
+                )}
                 <div style={{ fontSize: 11, opacity: 0.5 }}>{auth.email}</div>
                 <button style={{ ...chipStyle, textAlign: "left" }} onClick={onSignOut}>
                   Sign out

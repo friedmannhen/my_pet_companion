@@ -60,7 +60,8 @@
     "publish": {
       "provider": "github",
       "owner": "friedmannhen",
-      "repo": "my_pet_companion"
+      "repo": "my_pet_companion",
+      "releaseType": "release"
     }
   }
 }

@@ -149,8 +149,12 @@ function fitOverlayToWorkArea(): void {
 }
 
 export interface UpdateStatus {
-  state: "downloading" | "ready";
-  version: string;
+  state: "checking" | "downloading" | "ready" | "error";
+  version?: string;
+  /** 0-100, only meaningful while state === "downloading". */
+  percent?: number;
+  /** Only meaningful while state === "error". */
+  message?: string;
 }
 
 function sendUpdateStatus(status: UpdateStatus): void {
@@ -164,27 +168,52 @@ function sendUpdateStatus(status: UpdateStatus): void {
  * downloads quietly in the background, then tells the renderer once it's
  * ready so it can show a "restart to update" button instead of silently
  * waiting for the next natural quit — a professional app shouldn't update
- * itself with zero visibility. `autoInstallOnAppQuit` stays on as a
- * fallback: even if the user ignores the button and just quits normally,
- * the update still applies. No-ops entirely in `pnpm dev` (electron-updater
- * requires a packaged, signed-or-not installer build to have anything to
- * compare against — `app.isPackaged` is false for the dev/electron-vite run).
+ * itself with zero visibility.
+ *
+ * `autoInstallOnAppQuit` is explicitly OFF (electron-updater's default is
+ * true). With it on, a completed download gets silently installed the next
+ * time the app quits for ANY reason — not just the "restart to update"
+ * button. That raced badly in practice: quitting normally, then relaunching
+ * the app quickly (as during manual testing) could open the new process
+ * while the background installer was still mid-copy over the same install
+ * directory, corrupting it (observed: a `ffmpeg.dll not found` error from a
+ * half-overwritten Electron runtime). Installing is now ONLY ever triggered
+ * by the explicit `overlay:install-update` IPC call below — the user always
+ * sees and chooses the moment the app restarts to apply an update.
+ *
+ * No-ops entirely in `pnpm dev` (electron-updater requires a packaged,
+ * signed-or-not installer build to have anything to compare against —
+ * `app.isPackaged` is false for the dev/electron-vite run).
  */
 function setupAutoUpdate(): void {
   if (!app.isPackaged) return;
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.logger = console;
 
+  let pendingVersion: string | undefined;
+
+  autoUpdater.on("checking-for-update", () => {
+    sendUpdateStatus({ state: "checking" });
+  });
   autoUpdater.on("update-available", (info) => {
-    sendUpdateStatus({ state: "downloading", version: info.version });
+    pendingVersion = info.version;
+    sendUpdateStatus({ state: "downloading", version: info.version, percent: 0 });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    sendUpdateStatus({
+      state: "downloading",
+      version: pendingVersion,
+      percent: Math.round(progress.percent),
+    });
   });
   autoUpdater.on("update-downloaded", (info) => {
-    console.log(`[update] ${info.version} downloaded — will install on next restart`);
+    console.log(`[update] ${info.version} downloaded — will install when the user restarts`);
     sendUpdateStatus({ state: "ready", version: info.version });
   });
   autoUpdater.on("error", (err) => {
     console.error("[update] check/download failed:", err);
+    sendUpdateStatus({ state: "error", message: err.message });
   });
 
   autoUpdater.checkForUpdates().catch((err) => console.error("[update] initial check failed:", err));
@@ -196,6 +225,8 @@ function setupAutoUpdate(): void {
 ipcMain.handle("overlay:get-version", () => app.getVersion());
 // Lets the user click "restart to update" instead of waiting for the next
 // natural quit — quitAndInstall() is a no-op/harmless if nothing is ready yet.
+// This is now the ONLY path that ever installs a downloaded update (see
+// setupAutoUpdate's autoInstallOnAppQuit comment above).
 ipcMain.on("overlay:install-update", () => autoUpdater.quitAndInstall());
 
 app.whenReady().then(() => {

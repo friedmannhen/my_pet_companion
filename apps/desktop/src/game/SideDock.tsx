@@ -279,7 +279,9 @@ export interface SideDockProps {
   onSignOut: () => void;
   onQuit: () => void;
   appVersion: string;
-  updateState: "idle" | "downloading" | "ready";
+  updateState: "idle" | "checking" | "downloading" | "ready" | "error";
+  updatePercent: number | null;
+  updateError: string | null;
   onInstallUpdate: () => void;
   groupsApi: UseGroups;
   /** Group id of the room we're currently in (null = offline). */
@@ -317,6 +319,8 @@ export function SideDock({
   onQuit,
   appVersion,
   updateState,
+  updatePercent,
+  updateError,
   onInstallUpdate,
   groupsApi,
   activeRoomGroupId,
@@ -1354,7 +1358,13 @@ export function SideDock({
               ⬆ Update ready — restart
             </button>
           ) : updateState === "downloading" ? (
-            <span style={{ fontSize: 10, opacity: 0.4 }}>Downloading update…</span>
+            <span style={{ fontSize: 10, opacity: 0.4 }}>
+              Downloading update{updatePercent !== null ? ` — ${updatePercent}%` : "…"}
+            </span>
+          ) : updateState === "error" ? (
+            <span style={{ fontSize: 10, opacity: 0.5, color: "#f87171" }} title={updateError ?? undefined}>
+              ⚠️ Update check failed
+            </span>
           ) : null}
         </div>
       </div>

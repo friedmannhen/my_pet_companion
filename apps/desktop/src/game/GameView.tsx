@@ -1204,6 +1204,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onQuit={() => window.overlay.quit()}
         appVersion={appUpdate.version}
         updateState={appUpdate.updateState}
+        updatePercent={appUpdate.updatePercent}
+        updateError={appUpdate.updateError}
         onInstallUpdate={appUpdate.installUpdate}
         groupsApi={groupsApi}
         activeRoomGroupId={room.activeGroup?.id ?? null}

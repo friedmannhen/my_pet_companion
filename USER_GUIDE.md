@@ -75,11 +75,12 @@ its menus are interactive.
 
 ### Feeding
 Open the dock drawer (see below) and find the pile of 🍖 in the
-**Kitchen & toy box**. **Click a piece** to grab it — the drawer closes
-and it follows your cursor. **Click anywhere to throw it** — the food
-tumbles as it lands, and the pet **runs over and eats it**. Each piece you
-take leaves a gap in the pile that **regrows after 5 minutes** (the drawer
-shows a countdown until the next piece).
+**Kitchen & toy box**. **Click a piece** — the drawer closes, the food
+tosses itself to a random spot and tumbles as it lands, and the pet
+**runs over and eats it**, all automatically. Each piece you take leaves a
+gap in the pile that **regrows after 5 minutes** (the drawer shows a
+countdown until the next piece). Cancel anytime while it's in flight with
+**Esc** or **right-click**.
 
 Feeding a pet whose hunger is already full is an **overfeed**: instead of
 the usual gain, it costs happiness and care points (and the pet looks a bit
@@ -98,12 +99,12 @@ and progress pauses — you have to keep the sponge moving. Cancel anytime
 with **Esc**, **right-click**, or the **✕** button on the progress panel.
 
 ### Playing fetch
-**Click the ⚾ in the drawer** to grab it — same as food — then **click
-anywhere to throw it**. The ball glides, bounces, and the pet trots over,
-grabs it with a little bounce, winds up, and throws it back at you (a
-zoom-and-fade flourish, same beat as the old QA-hub widget). The ball's
-slot in the drawer sits empty until the pet is done playing, then the ball
-returns.
+**Click the ⚾ in the drawer** — same as food, one click does the whole
+thing: the ball tosses itself to a random spot, bounces, and the pet trots
+over, grabs it with a little bounce, winds up, and throws it back at you
+(a zoom-and-fade flourish, same beat as the old QA-hub widget). The ball's
+slot in the drawer sits empty until the pet is done playing, then it
+returns. Cancel anytime with **Esc** or **right-click**.
 
 ### Evolving
 Tapping a ready egg, or clicking ✨ Evolve! on a hatched pet, starts a

@@ -8,11 +8,14 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dist:win": "electron-vite build && electron-builder --win --publish never",
+    "release:win": "electron-vite build && electron-builder --win --publish always"
   },
   "dependencies": {
     "@pet/core": "workspace:*",
     "@supabase/supabase-js": "^2.110.1",
+    "electron-updater": "^6.8.9",
     "framer-motion": "^12.0.0",
     "react": "catalog:",
     "react-dom": "catalog:"
@@ -22,8 +25,42 @@
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "^33.0.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^3.0.0",
     "typescript": "catalog:",
     "vite": "^6.0.0"
+  },
+  "build": {
+    "appId": "com.henfriedmann.mypetcompanion",
+    "productName": "My Pet Companion",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "MyPetCompanion-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "friedmannhen",
+      "repo": "my_pet_companion"
+    }
   }
 }

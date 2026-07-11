@@ -5,6 +5,7 @@
 // blocking clicks to apps underneath.
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 import { join } from "node:path";
+import { autoUpdater } from "electron-updater";
 
 // Chromium's native-window-occlusion detection (Windows) sees the overlay's
 // always-on-top, screen-spanning window as covering everything below it in
@@ -147,8 +148,36 @@ function fitOverlayToWorkArea(): void {
   overlay.setResizable(false);
 }
 
+/**
+ * Silent background auto-update (QA/beta distribution — plan follow-up).
+ * Checks GitHub Releases on launch and again every 2h; downloads quietly
+ * and installs on the NEXT app restart (never interrupts an active session
+ * by force-quitting). No-ops entirely in `pnpm dev` (electron-updater
+ * requires a packaged, signed-or-not installer build to have anything to
+ * compare against — `app.isPackaged` is false for the dev/electron-vite run).
+ */
+function setupAutoUpdate(): void {
+  if (!app.isPackaged) return;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = console;
+
+  autoUpdater.on("update-downloaded", (info) => {
+    console.log(`[update] ${info.version} downloaded — will install on next restart`);
+  });
+  autoUpdater.on("error", (err) => {
+    console.error("[update] check/download failed:", err);
+  });
+
+  autoUpdater.checkForUpdates().catch((err) => console.error("[update] initial check failed:", err));
+  setInterval(() => {
+    autoUpdater.checkForUpdates().catch((err) => console.error("[update] periodic check failed:", err));
+  }, 2 * 3600_000);
+}
+
 app.whenReady().then(() => {
   createOverlay();
+  setupAutoUpdate();
 
   screen.on("display-metrics-changed", fitOverlayToWorkArea);
   screen.on("display-added", fitOverlayToWorkArea);

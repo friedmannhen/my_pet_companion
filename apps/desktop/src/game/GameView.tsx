@@ -93,7 +93,7 @@ const EGG_SPRITES = { idle: eggIdle, crack1: eggCrack1, crack2: eggCrack2, crack
 const EGG_HATCH_TIMING = {
   // How long the pet sits wiggling inside the burst-open shell before it
   // jumps out.
-  seatedMs: 2400,
+  seatedMs: 5000,
   // Duration of the jump-out arc itself.
   jumpMs: 750,
   // Duration of the "happy" wiggle right after landing outside the shell.
@@ -278,6 +278,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const [happyPulse, setHappyPulse] = useState(false);
   const [evolvePulse, setEvolvePulse] = useState(false);
   const [blinking, setBlinking] = useState(false);
+  // "Follow Me" — chases the cursor; overrides Stay/Free-Roam while active
+  // and is force-cancelled below whenever the pet becomes non-interactive.
+  const [isFollowing, setIsFollowing] = useState(false);
 
   // True while the pet is mid-action in a way that needs it to stand still
   // and not be interrupted: no wander, no drag, no menu-open tap. Any
@@ -289,9 +292,19 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // its lease — a visible behavior change (not just a buried settings
   // button) so it's unmistakable this session lost ownership.
   const stationary = save.isSleeping || !save.isAlive || game.isEgg || lease.status === "kicked";
+  // Follow Me pauses while the radial menu is open or the pet is busy, same
+  // gating as wander — cancelled outright once `stationary` applies (egg,
+  // sleeping, dead, kicked) by the effect just below.
+  const followingActive = isFollowing && !stationary && !menuOpen && !petBusy;
   const movement = usePetMovement({
-    active: !stationary && !menuOpen && !petBusy,
+    active: !stationary && !menuOpen && !petBusy && !followingActive && prefs.movementMode === "free",
+    following: followingActive,
+    followSpeed: prefs.followSpeed,
   });
+
+  useEffect(() => {
+    if (stationary) setIsFollowing(false);
+  }, [stationary]);
 
   // Drag-lag lean: an overdamped spring chases the container's real
   // position; the (small) gap between them becomes a lean offset on the
@@ -1148,7 +1161,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             height={PET_SIZE}
             draggable={false}
             alt={save.name}
-            style={{ position: "absolute", inset: 0, zIndex: 1, filter: save.isSleeping ? "brightness(0.8)" : undefined }}
+            style={{ position: "absolute", inset: 0, zIndex: 1 }}
           />
           {(blinking || save.isSleeping) && (
             <img
@@ -1177,7 +1190,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         width={PET_SIZE}
         height={PET_SIZE}
         draggable={false}
-        style={{ filter: save.isSleeping ? "brightness(0.8)" : undefined }}
         alt={save.name}
       />
     );
@@ -1307,6 +1319,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     const seatY = (center?.y ?? 0) + petOffset;
     movement.x.set(seatX);
     movement.y.set(seatY);
+    // The inner sprite wrapper's "lean" offset (leanX/leanY, near the top
+    // of this component) is `lagX/lagY - movement.x/y`, where lagX/lagY is
+    // an overdamped spring chasing movement.x/y — by design, so ordinary
+    // wander/drag motion gives the body a trailing squash-lean instead of
+    // rigidly snapping to the cursor. But that spring can't tell an
+    // intentional instant teleport (this seat snap) from a huge, fast
+    // drag: right after the `.set()` above, lagX/lagY are still miles from
+    // the new seat position, so leanX/leanY briefly reports the ENTIRE
+    // jump distance — visually, the pet appears to slide in from outside
+    // the shell instead of just appearing seated. `.jump()` (unlike
+    // `.set()`) resets a spring's value AND velocity immediately, with no
+    // animation, so snapping lagX/lagY here too keeps leanX/leanY at 0
+    // through the teleport.
+    lagX.jump(seatX);
+    lagY.jump(seatY);
     setPetSeatedWiggling(true);
 
     // Top shell: thrown farther and lands rotated a full 180deg (upside
@@ -1345,7 +1372,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       eggTopY.set(0);
       eggTopRotate.set(0);
     }, t.seatedMs + t.jumpMs + t.wanderMs + t.fadeMs);
-  }, [eggPhase, game, sfx, spawnEggShards, movement.x, movement.y, eggTopX, eggTopY, eggTopRotate, hatchCenter, clearHatchTimers, scheduleHatch]);
+  }, [eggPhase, game, sfx, spawnEggShards, movement.x, movement.y, lagX, lagY, eggTopX, eggTopY, eggTopRotate, hatchCenter, clearHatchTimers, scheduleHatch]);
 
   // Any later stage-up (baby->adult->final): no dedicated art yet, so it
   // keeps the original 10s "charging" glow placeholder + flash reveal.
@@ -1389,6 +1416,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           disabled: petCooldownMs > 0,
           cooldownProgress: 1 - petCooldownMs / PET_COOLDOWN_MS,
           cooldownLabel: petCooldownMs > 0 ? fmtCooldown(petCooldownMs) : undefined,
+        },
+        {
+          key: "movementMode",
+          icon: prefs.movementMode === "free" ? "📌" : "🐾",
+          label: prefs.movementMode === "free" ? "Stay" : "Free Roam",
+          onClick: prefs.toggleMovementMode,
+        },
+        {
+          key: "follow",
+          icon: isFollowing ? "🛑" : "🧲",
+          label: isFollowing ? "Stop Follow" : "Follow Me",
+          onClick: () => setIsFollowing((f) => !f),
         },
         { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
       ];
@@ -1494,6 +1533,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onStartClean={startCleaning}
         soundEnabled={prefs.soundEnabled}
         onToggleSound={prefs.toggleSound}
+        followSpeed={prefs.followSpeed}
+        onSetFollowSpeed={prefs.setFollowSpeed}
         onRename={game.rename}
         onSignOut={auth.signOut}
         onQuit={() => window.overlay.quit()}

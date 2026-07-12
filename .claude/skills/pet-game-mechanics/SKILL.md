@@ -2,21 +2,23 @@
 name: pet-game-mechanics
 description: >
   Deep implementation knowledge of my_pet_companion's care-action mechanics —
-  feed, ball, wash, and pet wander/drag movement — in
+  feed, ball, wash, and pet wander/drag/follow movement — in
   apps/desktop/src/game/GameView.tsx, useConsumables.ts, usePetMovement.ts,
-  SideDock.tsx, and the click-through overlay layer
+  useGamePrefs.ts, SideDock.tsx, and the click-through overlay layer
   (overlay/clickableOverride.ts, overlay/useHitTest.ts). Covers the
   framer-motion grab-drag-throw handoff pattern, the ballistic-arc throw
   physics with squash-and-stretch, the petBusy/feedPhase/ballPhase state
-  machine, and several React footguns already discovered and fixed in this
-  exact codebase. USE THIS SKILL whenever the task touches: feeding, the ball,
-  washing/scrubbing, dragging the pet or any thrown item, throw/arc/bounce
-  animation tuning, the SideDock's "Kitchen & toy box" items, petBusy /
-  feedPhase / ballPhase, click-through / overlay clickability bugs ("clicks
-  aren't registering", "menu is stuck", "need to close and reopen to
-  interact"), or before making ANY change to useConsumables.ts's
-  takeFood/takeBall/returnBall — a proven-broken pattern is documented below
-  and must not be reintroduced even by accident.
+  machine, the Stay/Free-Roam movement-mode toggle, the Follow-Me cursor-
+  chase rAF loop, and several React footguns already discovered and fixed in
+  this exact codebase. USE THIS SKILL whenever the task touches: feeding, the
+  ball, washing/scrubbing, dragging the pet or any thrown item, throw/arc/
+  bounce animation tuning, the SideDock's "Kitchen & toy box" items, petBusy /
+  feedPhase / ballPhase, the radial menu's Stay / Free Roam / Follow Me
+  buttons, the Settings view's Follow Me speed picker, click-through /
+  overlay clickability bugs ("clicks aren't registering", "menu is stuck",
+  "need to close and reopen to interact"), or before making ANY change to
+  useConsumables.ts's takeFood/takeBall/returnBall — a proven-broken pattern
+  is documented below and must not be reintroduced even by accident.
 ---
 
 # Pet game mechanics (feed / ball / wash / movement)
@@ -34,9 +36,14 @@ been wrong multiple times in ways that took real debugging to uncover.
   drag, evolution, all wired together. ~1500+ lines; search by feature
   comment header (`// ── Feed & Ball`, `// ── Wash`, etc.).
 - `useConsumables.ts` — food-pile respawn timers + ball-out-or-in-slot state.
-- `usePetMovement.ts` — wander, drag-glide-throw for the pet itself, and
+- `usePetMovement.ts` — wander, drag-glide-throw for the pet itself,
   `walkTo()` (used by feed/ball/evolve sequences to make the pet walk
-  somewhere and await arrival).
+  somewhere and await arrival), and the Follow-Me cursor-chase rAF loop
+  (`following`/`followSpeed` options — see "Movement" below).
+- `useGamePrefs.ts` — persisted local prefs: sound, `movementMode`
+  ("free"/"static" — the Stay/Free-Roam toggle), `followSpeed`
+  ("slow"/"normal"/"fast", set from the Settings view, consumed by the
+  Follow-Me loop).
 - `SideDock.tsx` — the drawer UI: food pile spans, the ball span, the
   sponge. These are just trigger elements (`onPointerDown`) — the actual
   animated food/ball live in GameView as always-mounted, always-rendered
@@ -238,7 +245,28 @@ on distinguishing it from `"released"`/`"playing"`.
 
 - **Wander**: random target every 4–12s via `animate()` springs
   (`stiffness: 45, damping: 16`), paused while `active` is false (menu open,
-  petBusy, asleep, etc).
+  petBusy, asleep, etc). Also gated off at the GameView call site when the
+  **Stay** setting (`useGamePrefs().movementMode === "static"`) is on —
+  wander and "Stay" are the same `active` flag, just one more AND'd
+  condition (`prefs.movementMode === "free"`); "Stay" does NOT disable
+  dragging, only the self-directed wander loop.
+- **Follow Me** (added alongside Stay/Free-Roam, Jul 2026): a separate rAF
+  chase loop inside the hook, gated by its own `following`/`followSpeed`
+  options — mutually exclusive with wander (GameView passes `active: false`
+  whenever `following` is true; never rely on both being on at once, the
+  hook doesn't defend against that itself). Reads the cursor from
+  **`window.overlay.onCursor`**, NOT a native `mousemove` listener — same
+  reason as `useHitTest.ts` (native mousemove doesn't reliably reach this
+  click-through overlay). Has a 140px dead zone (stops before reaching the
+  literal cursor point) and three speed presets (`slow/normal/fast`, see
+  `FOLLOW_SPEED` map) driven by `useGamePrefs().followSpeed`. Dragging the
+  pet always wins: `dragActiveRef` pauses the chase loop during a drag and
+  for 650ms after `onDragEnd` (mirrors the glide-then-resume-wander timing
+  used elsewhere in this hook) so the two gestures don't fight over
+  `x`/`y`. GameView owns the toggle state (`isFollowing`) and force-cancels
+  it whenever the pet becomes non-interactive (sleeping/dead/egg/kicked) or
+  the radial menu opens — the hook itself has no opinion on when following
+  *should* be on, only how to chase once told to.
 - **Drag-glide-throw** (the pet itself, not food/ball): `drag` prop directly
   on the pet's own `motion.div` (no cross-element handoff needed — this is
   the "native" framer-motion drag case). `dragMomentum={false}`; velocity is
@@ -273,3 +301,13 @@ on distinguishing it from `"released"`/`"playing"`.
   called — check `useConsumables.returnBall()`/similar side effects are
   ALSO replayed on the cancel-while-held path, not just in the sequence's
   own `finally`).
+- Follow Me's cursor tracking MUST use `window.overlay.onCursor`, never a
+  plain `window.addEventListener("mousemove", ...)` — same click-through
+  overlay limitation as `useHitTest.ts`. A native listener will appear to
+  work while clickable but silently stop updating the instant the window
+  goes click-through again.
+- Wander (`active`) and Follow Me (`following`) must never both be true at
+  once — GameView enforces this by construction (`active` is ANDed with
+  `!followingActive`), not the hook itself. If you add a third movement
+  driver (another rAF loop touching `x`/`y`), gate it the same way at the
+  call site rather than teaching the hook about every combination.

@@ -37,6 +37,7 @@ import type { PetGame } from "./usePetGame";
 import type { AuthState } from "../supabase/useAuth";
 import type { SessionLease } from "../session/useSessionLease";
 import type { RibbonSide } from "./useRibbonPrefs";
+import type { FollowSpeed } from "./useGamePrefs";
 import { useLeaderboard } from "./useLeaderboard";
 import type { GroupInfo, UseGroups } from "./useGroups";
 import "./hud.css";
@@ -275,6 +276,8 @@ export interface SideDockProps {
   onStartClean: () => void;
   soundEnabled: boolean;
   onToggleSound: () => void;
+  followSpeed: FollowSpeed;
+  onSetFollowSpeed: (speed: FollowSpeed) => void;
   onRename: (name: string) => void;
   onSignOut: () => void;
   onQuit: () => void;
@@ -314,6 +317,8 @@ export function SideDock({
   onStartClean,
   soundEnabled,
   onToggleSound,
+  followSpeed,
+  onSetFollowSpeed,
   onRename,
   onSignOut,
   onQuit,
@@ -631,6 +636,23 @@ export function SideDock({
               <button style={{ ...chipStyle, width: "100%", textAlign: "left" }} onClick={onToggleSound}>
                 {soundEnabled ? "🔊 Sounds: on" : "🔇 Sounds: off"}
               </button>
+              <div style={{ fontSize: 11, opacity: 0.55, margin: "10px 0 4px" }}>Follow Me speed</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {(["slow", "normal", "fast"] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => onSetFollowSpeed(s)}
+                    style={{
+                      ...chipStyle,
+                      flex: 1,
+                      textAlign: "center",
+                      background: followSpeed === s ? "rgba(52,211,153,0.35)" : "rgba(255,255,255,0.1)",
+                    }}
+                  >
+                    {{ slow: "🐌 Slow", normal: "🐾 Normal", fast: "⚡ Fast" }[s]}
+                  </button>
+                ))}
+              </div>
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <input
                   value={nameDraft}
@@ -1172,9 +1194,9 @@ export function SideDock({
                         onPointerDown={
                           canFeed && foodReady[i]
                             ? (e) => {
-                                if (e.button !== 0) return;
-                                onGrabFood(e, i);
-                              }
+                              if (e.button !== 0) return;
+                              onGrabFood(e, i);
+                            }
                             : undefined
                         }
                         title={
@@ -1219,9 +1241,9 @@ export function SideDock({
                       onPointerDown={
                         canPlayBall && ballReady
                           ? (e) => {
-                              if (e.button !== 0) return;
-                              onGrabBall(e);
-                            }
+                            if (e.button !== 0) return;
+                            onGrabBall(e);
+                          }
                           : undefined
                       }
                       title={

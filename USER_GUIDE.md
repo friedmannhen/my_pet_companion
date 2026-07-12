@@ -49,12 +49,24 @@ its menus are interactive.
     while recharging, a ring fills in around the button and a countdown
     badge (e.g. "3m", "45s") shows underneath it, so it's obvious when
     you'll be able to pet again.
+  - 📌 **Stay** / 🐾 **Free Roam** — toggles whether the pet wanders on its
+    own. "Stay" freezes it in place (you can still drag it manually);
+    "Free Roam" (the default) lets it wander as usual. The button always
+    shows the action you'd switch *to*.
+  - 🧲 **Follow Me** / 🛑 **Stop Follow** — the pet chases your mouse cursor
+    around the screen instead of wandering, stopping once it's close by
+    (so it doesn't sit glued to the pointer). Dragging the pet still works
+    while following — it pauses the chase briefly, then resumes. How fast
+    it chases is set in **Settings → Follow Me speed**. Follow is
+    automatically turned off if the pet falls asleep, dies, or you open
+    the radial menu again.
   - 🌙 **Tuck in** — manual sleep toggle. This is *protected sleep*: stats
     stay frozen (floored, never dropping to zero) for up to 72 hours, so
     leaving the pet asleep over a weekend is safe.
   - ✨ **Evolve!** (appears only when ready) — see "Evolving" below.
 - While the pet is **asleep**, the menu only shows **☀️ Wake** — every
-  other action is hidden (not just disabled) until it wakes up.
+  other action is hidden (not just disabled) until it wakes up. Stay/Free
+  Roam and Follow Me aren't available during the egg stage either.
 - Feed, Wash and Ball aren't on this menu — the food pile, sponge, and
   ball all live in the dock drawer's **Kitchen & toy box** (see below).
 - Click the pet again (or click elsewhere) to close the menu.
@@ -137,12 +149,13 @@ game's drawer.
 - The **⚙ Settings view** (gear button in the drawer header) has: dock
   side (left/right edge), a **🔊 sound toggle** (feeding noms, wash
   splashes, pet squeaks, evolution fanfares — all synthesized, no audio
-  files), **renaming your pet** (confirms with a green "✓ Renamed!" once
-  saved), your **display name** for the leaderboard (same confirmation),
-  **⚠️ Take over** (only shown if your account is active on another device
-  — click to make *this* the live session), **Sign out**, and **Quit**. A
-  red sync-error message appears here too if something's wrong with cloud
-  sync.
+  files), a **Follow Me speed** picker (🐌 Slow / 🐾 Normal / ⚡ Fast — how
+  fast the pet chases your cursor when Follow Me is on), **renaming your
+  pet** (confirms with a green "✓ Renamed!" once saved), your **display
+  name** for the leaderboard (same confirmation), **⚠️ Take over** (only
+  shown if your account is active on another device — click to make *this*
+  the live session), **Sign out**, and **Quit**. A red sync-error message
+  appears here too if something's wrong with cloud sync.
 - A colored dot on the tab shows cloud-sync status at a glance (green =
   synced, yellow = syncing, gray = offline, red = error). A red number
   badge on the tab means you have unclaimed quest/achievement rewards.

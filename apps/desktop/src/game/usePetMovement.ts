@@ -8,6 +8,14 @@ import { useMotionValue, animate, type PanInfo } from "framer-motion";
 
 const PET_SIZE = 128;
 const MARGIN = 16;
+// "Follow Me" chase tuning — halts inside the dead zone so the cursor can
+// rest near the pet without it jittering in place chasing sub-pixel deltas.
+const FOLLOW_DEAD_ZONE = 140;
+const FOLLOW_SPEED: Record<"slow" | "normal" | "fast", { f: number; max: number }> = {
+  slow: { f: 0.055, max: 4 },
+  normal: { f: 0.09, max: 7 },
+  fast: { f: 0.14, max: 14 },
+};
 
 function clampPos(x: number, y: number) {
   const vw = window.innerWidth;
@@ -31,6 +39,11 @@ export interface UsePetMovementOptions {
   /** Wander only runs when this is true (alive, hatched, not sleeping, menu closed). */
   active: boolean;
   initial?: { x: number; y: number };
+  /** "Follow Me" — chases the OS cursor instead of wandering. Callers
+   * should also pass `active: false` while this is true (wander and
+   * follow must never drive x/y in the same tick). */
+  following?: boolean;
+  followSpeed?: "slow" | "normal" | "fast";
 }
 
 export interface UsePetMovement {
@@ -52,7 +65,7 @@ export interface UsePetMovement {
   walkTo: (targetX: number, targetY: number, speedPxPerFrame?: number) => Promise<void>;
 }
 
-export function usePetMovement({ active, initial }: UsePetMovementOptions): UsePetMovement {
+export function usePetMovement({ active, initial, following = false, followSpeed = "normal" }: UsePetMovementOptions): UsePetMovement {
   const x = useMotionValue(initial?.x ?? 200);
   const y = useMotionValue(initial?.y ?? 200);
   const [facing, setFacing] = useState<"left" | "right">("right");
@@ -62,6 +75,15 @@ export function usePetMovement({ active, initial }: UsePetMovementOptions): UseP
   // is disabled so all "throw" feel comes from this + the glide spring below.
   const dragVelRef = useRef({ vx: 0, vy: 0, lastX: 0, lastY: 0, lastT: 0 });
   const activeRef = useRef(false);
+  // Follow Me — dragging always takes priority: paused while a drag is in
+  // progress and for a short grace period after release (matches the
+  // pet's own "never fight the user's cursor" drag-glide behavior).
+  const followSpeedRef = useRef(followSpeed);
+  followSpeedRef.current = followSpeed;
+  const cursorRef = useRef({ x: 0, y: 0 });
+  const dragActiveRef = useRef(false);
+  const followPauseUntilRef = useRef(0);
+  const followMovingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animsRef = useRef<{ stop: () => void }[]>([]);
 
@@ -120,6 +142,55 @@ export function usePetMovement({ active, initial }: UsePetMovementOptions): UseP
     return () => window.removeEventListener("resize", onResize);
   }, [x, y]);
 
+  // Follow Me — track the OS cursor via the main-process stream (plain
+  // `mousemove` doesn't reach this click-through overlay reliably, see
+  // useHitTest.ts) while following is active.
+  useEffect(() => {
+    if (!following) return;
+    const off = window.overlay.onCursor(({ x: cx, y: cy }) => {
+      cursorRef.current = { x: cx, y: cy };
+    });
+    return off;
+  }, [following]);
+
+  // Follow Me — rAF chase loop. Mutually exclusive with wander: the caller
+  // is expected to pass `active: false` while `following` is true.
+  useEffect(() => {
+    if (!following) return;
+    let raf: number;
+    const frame = () => {
+      const paused = dragActiveRef.current || performance.now() < followPauseUntilRef.current;
+      if (paused) {
+        if (followMovingRef.current) {
+          followMovingRef.current = false;
+          setIsMoving(false);
+        }
+        raf = requestAnimationFrame(frame);
+        return;
+      }
+      const dx = cursorRef.current.x - (x.get() + PET_SIZE / 2);
+      const dy = cursorRef.current.y - (y.get() + PET_SIZE / 2);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const moving = dist > FOLLOW_DEAD_ZONE;
+      if (moving !== followMovingRef.current) {
+        followMovingRef.current = moving;
+        setIsMoving(moving);
+      }
+      if (moving) {
+        const nf: "left" | "right" = dx > 0 ? "right" : "left";
+        setFacing((prev) => (prev !== nf ? nf : prev));
+        const { f, max } = FOLLOW_SPEED[followSpeedRef.current];
+        const speed = Math.min(dist * f, max);
+        const { x: cx, y: cy } = clampPos(x.get() + (dx / dist) * speed, y.get() + (dy / dist) * speed);
+        x.set(cx);
+        y.set(cy);
+      }
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [following, x, y]);
+
   const onDragStart = useCallback(() => {
     stopAnims();
     if (timerRef.current) {
@@ -127,6 +198,7 @@ export function usePetMovement({ active, initial }: UsePetMovementOptions): UseP
       timerRef.current = null;
     }
     setIsMoving(false);
+    dragActiveRef.current = true;
     dragVelRef.current = { vx: 0, vy: 0, lastX: x.get(), lastY: y.get(), lastT: performance.now() };
   }, [stopAnims, x, y]);
 
@@ -157,6 +229,8 @@ export function usePetMovement({ active, initial }: UsePetMovementOptions): UseP
     const gx = animate(x, cx, { type: "spring", stiffness: 80, damping: 24 });
     const gy = animate(y, cy, { type: "spring", stiffness: 80, damping: 24 });
     animsRef.current = [gx, gy];
+    dragActiveRef.current = false;
+    followPauseUntilRef.current = performance.now() + 650;
     if (activeRef.current) {
       timerRef.current = setTimeout(() => scheduleNext(), 650);
     }

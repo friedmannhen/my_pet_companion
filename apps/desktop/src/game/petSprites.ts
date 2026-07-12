@@ -1,16 +1,19 @@
 // Shared pet visuals: the cat is the only type with real art (MVP roster);
 // every other type renders as an emoji stand-in until its sheets land.
 // Used by both the local pet (GameView) and remote pets in online rooms.
-import catBaby from "../assets/pets/black_cat/black_cat_baby.png";
-import catBabyBlink from "../assets/pets/black_cat/black_cat_baby_blink.png";
+import babyBody from "../assets/pets/black_cat/baby/baby_body.png";
 import catAdult from "../assets/pets/black_cat/black_cat_adult.png";
 import catAdultBlink from "../assets/pets/black_cat/black_cat_adult_blink.png";
 import catFinal from "../assets/pets/black_cat/black_cat_final.png";
 import catFinalBlink from "../assets/pets/black_cat/black_cat_final_blink.png";
 import catFinalSleep from "../assets/pets/black_cat/black_cat__final_sleep.png";
 
+// Baby is authored as layered pieces now (see GameView's BABY_LAYERS for the
+// real tail + wink composite) — remote pets render a single flat <img>, so
+// this just falls back to the body-only pose (missing the tail/wink swap
+// until RemotePets is worth upgrading to layered rendering too).
 export const CAT_SPRITES: Record<number, { idle: string; blink: string; sleep?: string }> = {
-  1: { idle: catBaby, blink: catBabyBlink },
+  1: { idle: babyBody, blink: babyBody },
   2: { idle: catAdult, blink: catAdultBlink },
   3: { idle: catFinal, blink: catFinalBlink, sleep: catFinalSleep },
 };

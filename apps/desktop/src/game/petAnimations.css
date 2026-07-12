@@ -5,14 +5,18 @@
 .pet-anim-walk {
   animation: pet-walk 0.48s ease-in-out infinite;
 }
+
 @keyframes pet-walk {
+
   0%,
   100% {
     transform: translateY(0) rotate(0deg);
   }
+
   25% {
     transform: translateY(-7px) rotate(-5deg);
   }
+
   75% {
     transform: translateY(-7px) rotate(5deg);
   }
@@ -21,11 +25,14 @@
 .pet-anim-eat {
   animation: pet-eat 0.28s ease-in-out infinite;
 }
+
 @keyframes pet-eat {
+
   0%,
   100% {
     transform: scale(1, 1);
   }
+
   50% {
     transform: scale(1.08, 0.92);
   }
@@ -34,16 +41,20 @@
 .pet-anim-happy {
   animation: pet-happy 0.7s ease-in-out;
 }
+
 @keyframes pet-happy {
   0% {
     transform: scale(1) rotate(0deg);
   }
+
   30% {
     transform: scale(1.18) rotate(-6deg);
   }
+
   60% {
     transform: scale(1.1) rotate(5deg);
   }
+
   100% {
     transform: scale(1) rotate(0deg);
   }
@@ -52,11 +63,14 @@
 .pet-anim-evolve {
   animation: pet-evolve 0.65s ease-in-out 4;
 }
+
 @keyframes pet-evolve {
+
   0%,
   100% {
     filter: brightness(1);
   }
+
   50% {
     filter: brightness(4);
   }
@@ -67,12 +81,15 @@
 .pet-anim-charging {
   animation: pet-charging 1s ease-in-out infinite;
 }
+
 @keyframes pet-charging {
+
   0%,
   100% {
     filter: brightness(1) saturate(1);
     transform: scale(1);
   }
+
   50% {
     filter: brightness(1.6) saturate(1.4);
     transform: scale(1.06);
@@ -83,11 +100,14 @@
 .pet-anim-idle-breathe {
   animation: pet-idle-breathe 2.6s ease-in-out infinite;
 }
+
 @keyframes pet-idle-breathe {
+
   0%,
   100% {
     transform: scale(1, 1);
   }
+
   50% {
     transform: scale(1.015, 0.985);
   }
@@ -98,12 +118,57 @@
 .pet-anim-overheat {
   animation: pet-overheat 0.5s ease-in-out infinite;
 }
+
 @keyframes pet-overheat {
+
   0%,
   100% {
     filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.9)) saturate(1.3);
   }
+
   50% {
     filter: drop-shadow(0 0 16px rgba(239, 68, 68, 1)) saturate(1.8) brightness(1.15);
+  }
+}
+
+/* Egg hatch wiggle — "something's trying to get out." Used both for the
+   click-gated crack progression (handleEvolve/advanceHatch) and, briefly,
+   for the pet sitting inside the burst-open shell before it jumps out. */
+.egg-anim-wiggle {
+  animation: egg-wiggle 0.5s ease-in-out infinite;
+}
+
+@keyframes egg-wiggle {
+
+  0%,
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+
+  25% {
+    transform: translateX(-3px) rotate(-4deg);
+  }
+
+  75% {
+    transform: translateX(3px) rotate(4deg);
+  }
+}
+
+/* Ready-to-hatch ambient cue on the small idle egg (game.canHatch) — a
+   warm glow pulse, paired with egg-anim-wiggle, until the player clicks to
+   start the hatch cutscene. */
+.egg-anim-ready-flash {
+  animation: egg-ready-flash 1s ease-in-out infinite;
+}
+
+@keyframes egg-ready-flash {
+
+  0%,
+  100% {
+    filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.7)) brightness(1);
+  }
+
+  50% {
+    filter: drop-shadow(0 0 14px rgba(250, 204, 21, 1)) brightness(1.25);
   }
 }

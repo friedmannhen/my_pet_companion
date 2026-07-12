@@ -90,3 +90,37 @@ export function playSwish() {
   osc.start(ac.currentTime);
   osc.stop(ac.currentTime + 0.26);
 }
+
+/** Eggshell crack/snap — played on each click while hatching. Synthesised
+ *  (no audio file, matching every other sound in this module): a short
+ *  high-pitched "snap" with a fast downward pitch glide, layered with a
+ *  lower "thud" a beat later for weight. */
+export function playCrack() {
+  const ac = getCtx();
+  if (!ac) return;
+
+  const snap = ac.createOscillator();
+  const snapGain = ac.createGain();
+  snap.connect(snapGain);
+  snapGain.connect(ac.destination);
+  snap.type = "square";
+  snap.frequency.setValueAtTime(1800, ac.currentTime);
+  snap.frequency.exponentialRampToValueAtTime(300, ac.currentTime + 0.05);
+  snapGain.gain.setValueAtTime(0.22, ac.currentTime);
+  snapGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.06);
+  snap.start(ac.currentTime);
+  snap.stop(ac.currentTime + 0.07);
+
+  const thud = ac.createOscillator();
+  const thudGain = ac.createGain();
+  thud.connect(thudGain);
+  thudGain.connect(ac.destination);
+  thud.type = "triangle";
+  thud.frequency.setValueAtTime(160, ac.currentTime + 0.01);
+  thud.frequency.exponentialRampToValueAtTime(60, ac.currentTime + 0.09);
+  thudGain.gain.setValueAtTime(0, ac.currentTime + 0.01);
+  thudGain.gain.linearRampToValueAtTime(0.18, ac.currentTime + 0.02);
+  thudGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.1);
+  thud.start(ac.currentTime + 0.01);
+  thud.stop(ac.currentTime + 0.11);
+}

@@ -40,20 +40,68 @@ import { RoomBar } from "../online/RoomBar";
 import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
-import catBaby from "../assets/pets/black_cat/black_cat_baby.png";
-import catBabyBlink from "../assets/pets/black_cat/black_cat_baby_blink.png";
+import babyBody from "../assets/pets/black_cat/baby/baby_body.png";
+import babyTail from "../assets/pets/black_cat/baby/baby_tail.png";
+import babyWink from "../assets/pets/black_cat/baby/baby_wink.png";
 import catAdult from "../assets/pets/black_cat/black_cat_adult.png";
 import catAdultBlink from "../assets/pets/black_cat/black_cat_adult_blink.png";
 import catFinal from "../assets/pets/black_cat/black_cat_final.png";
 import catFinalBlink from "../assets/pets/black_cat/black_cat_final_blink.png";
 import catFinalSleep from "../assets/pets/black_cat/black_cat__final_sleep.png";
+import eggIdle from "../assets/pets/black_cat/egg/1.png";
+import eggCrack1 from "../assets/pets/black_cat/egg/2.png";
+import eggCrack2 from "../assets/pets/black_cat/egg/3.png";
+import eggCrack3 from "../assets/pets/black_cat/egg/4.png";
+import eggBack from "../assets/pets/black_cat/egg/BACK.png";
+import eggBottom from "../assets/pets/black_cat/egg/BOTTOM.png";
+import eggTop from "../assets/pets/black_cat/egg/TOP.png";
+import eggShard1 from "../assets/pets/black_cat/egg/crack1.png";
+import eggShard2 from "../assets/pets/black_cat/egg/crack2.png";
 
 const PET_SIZE = 128;
+// The unhatched egg idles at half the pet's cell size; once the hatch
+// cutscene starts it grows to HATCH_SIZE (1.5x PET_SIZE) and moves to
+// screen-center — see the hatchCenter/hatchCutsceneActive state below. The
+// pet itself always renders at PET_SIZE, even inside the enlarged shell.
+const EGG_IDLE_SIZE = PET_SIZE / 2;
+const HATCH_SIZE = Math.round(PET_SIZE * 1.5);
+// Shared resting line (offset from the hatch stage's center) that both the
+// fallen top shell and the crack shards settle onto, so they visually sit
+// on the same "ground" instead of at random heights.
+const HATCH_GROUND_DY = 74;
+
+// Baby stage is composited from layered pieces (per-stage subfolder
+// convention: apps/desktop/src/assets/pets/<pet>/<stage>/*) instead of one
+// flat pose image — tail behind, body (open eyes) on top, and a wink
+// overlay swapped in on top of that for the blink pose. Adult/final still
+// use the older flat-file convention (SPRITES) until their layered assets
+// land — copy this same split when they do.
+const BABY_LAYERS = { body: babyBody, tail: babyTail, wink: babyWink };
 
 const SPRITES: Record<number, { idle: string; blink: string; sleep?: string }> = {
-  1: { idle: catBaby, blink: catBabyBlink },
   2: { idle: catAdult, blink: catAdultBlink },
   3: { idle: catFinal, blink: catFinalBlink, sleep: catFinalSleep },
+};
+
+// Egg hatch: a phased sequence of individual (non-sheet) frames, matching
+// how every other pet stage is already authored in this repo (one PNG per
+// pose, not a grid sheet — see petSprites.ts). Unlike a plain timer, each
+// crack phase now waits for the player to click the egg again (see
+// advanceHatch) — only the post-burst tail (settle/jump/wander/fade) below
+// still runs on a timer.
+const EGG_SPRITES = { idle: eggIdle, crack1: eggCrack1, crack2: eggCrack2, crack3: eggCrack3 };
+const EGG_HATCH_TIMING = {
+  // How long the pet sits wiggling inside the burst-open shell before it
+  // jumps out.
+  seatedMs: 2400,
+  // Duration of the jump-out arc itself.
+  jumpMs: 750,
+  // Duration of the "happy" wiggle right after landing outside the shell.
+  happyMs: 700,
+  // How long the pet wanders freely before the leftover shell/shards fade
+  // (at least 5s so the shell stays on screen a while after the jump).
+  wanderMs: 5200,
+  fadeMs: 800,
 };
 
 const chipStyle: React.CSSProperties = {
@@ -173,6 +221,51 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const [feedPhase, setFeedPhase] = useState<"idle" | "held" | "released" | "eating">("idle");
   const [ballPhase, setBallPhase] = useState<"idle" | "held" | "playing">("idle");
   const [isEvolving, setIsEvolving] = useState(false);
+  // Egg hatch sequence — see advanceHatch and EGG_HATCH_TIMING. "idle" =
+  // normal small unhatched egg at its wander position; wiggle/crack1-3 are
+  // click-gated (advanceHatch moves to the next one) and rendered centered
+  // + enlarged (hatchCenter/HATCH_SIZE); "burst" is the shell splitting
+  // open — from there the REAL pet (not a decorative copy) sits in the
+  // shell, wiggles, then jumps out by animating movement.x/y directly, so
+  // it's the actual playable pet the whole time, never a fake stand-in.
+  const [eggPhase, setEggPhase] = useState<"idle" | "wiggle" | "crack1" | "crack2" | "crack3" | "burst">("idle");
+  const [eggShards, setEggShards] = useState<{ id: number; src: string; dx: number; dy: number; rotate: number }[]>([]);
+  const eggTopX = useMotionValue(0);
+  const eggTopY = useMotionValue(0);
+  const eggTopRotate = useMotionValue(0);
+  // Fixed screen position (top-left) for the enlarged HATCH_SIZE hatch
+  // stage, computed once from the viewport when the player clicks to start
+  // — the shell (back/bottom/top/shards) lives here for the whole
+  // sequence, decoupled from the pet's own wander position.
+  const [hatchCenter, setHatchCenter] = useState<{ x: number; y: number } | null>(null);
+  // True from the first hatch click until the pet has jumped clear of the
+  // shell and handed control back to normal wander. Used to gate the pet's
+  // own container's clicks/z-index during the cutscene — NOT to hide the
+  // pet itself (see visual's computation: the real pet shows again as soon
+  // as eggPhase reaches "burst", sitting right in the shell).
+  const [hatchCutsceneActive, setHatchCutsceneActive] = useState(false);
+  const [petSeatedWiggling, setPetSeatedWiggling] = useState(false);
+  const [petHappyWiggling, setPetHappyWiggling] = useState(false);
+  const [eggLeftoverFading, setEggLeftoverFading] = useState(false);
+  // Every setTimeout the hatch sequence schedules gets tracked here so an
+  // abandoned attempt (e.g. the player resets to a fresh egg via the admin
+  // panel mid-sequence) can have ALL its pending timers cancelled — without
+  // this, a stray timer from an abandoned run could fire well into the
+  // NEXT attempt and silently corrupt its state (this was the root cause
+  // of the hatch stage drifting further right on each retry).
+  const hatchTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearHatchTimers = useCallback(() => {
+    hatchTimersRef.current.forEach(clearTimeout);
+    hatchTimersRef.current = [];
+  }, []);
+  const scheduleHatch = useCallback((fn: () => void, ms: number) => {
+    const id = setTimeout(() => {
+      hatchTimersRef.current = hatchTimersRef.current.filter((x) => x !== id);
+      fn();
+    }, ms);
+    hatchTimersRef.current.push(id);
+  }, []);
+  useEffect(() => clearHatchTimers, [clearHatchTimers]);
   const [cleaningMode, setCleaningMode] = useState(false);
   const [scrubHeld, setScrubHeld] = useState(false);
   const [scrubbingEffectively, setScrubbingEffectively] = useState(false);
@@ -453,7 +546,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
   const canClean = save.isAlive && !save.isSleeping && save.cleanliness < 100 && !petBusy;
 
-  const throwFoodRef = useRef<(vx: number, vy: number) => void>(() => {});
+  const throwFoodRef = useRef<(vx: number, vy: number) => void>(() => { });
 
   const grabFood = useCallback(
     (e: React.PointerEvent, slot: number) => {
@@ -665,7 +758,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // synchronously, not via useEffect) is the release trigger of record.
   const ballReleasedRef = useRef(false);
   const ballUpListenerRef = useRef<(() => void) | null>(null);
-  const runBallFetchRef = useRef<(vx: number, vy: number) => void>(() => {});
+  const runBallFetchRef = useRef<(vx: number, vy: number) => void>(() => { });
 
   const grabBall = useCallback(
     (e: React.PointerEvent) => {
@@ -1032,21 +1125,53 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     return () => clearInterval(bubbleSpawnRef.current);
   }, [cleaningMode, scrubbingEffectively]);
 
-  // Sprite selection: egg + dead are emoji (no cat art for those states yet).
-  const stageSprites = SPRITES[save.evolutionStage];
-  let visual: React.ReactNode;
-  if (!save.isAlive) {
-    visual = <span style={{ fontSize: 84, filter: "grayscale(1)" }}>🪦</span>;
-  } else if (game.isEgg) {
-    visual = <span style={{ fontSize: 84 }}>🥚</span>;
-  } else if (stageSprites) {
+  // The actual pet sprite for the current stage — factored out so both the
+  // normal (post-hatch) slot below AND the hatch stage's "pet sitting in
+  // the burst-open shell" moment can render the exact same thing.
+  const renderPetSprite = (): React.ReactNode => {
+    if (save.evolutionStage === 1) {
+      // Baby stage is layered (tail behind, body on top, wink overlay
+      // swapped in for the blink pose) instead of a flat pose image.
+      return (
+        <div style={{ position: "relative", width: PET_SIZE, height: PET_SIZE }}>
+          <img
+            src={BABY_LAYERS.tail}
+            width={PET_SIZE}
+            height={PET_SIZE}
+            draggable={false}
+            alt=""
+            style={{ position: "absolute", inset: 0, zIndex: 0 }}
+          />
+          <img
+            src={BABY_LAYERS.body}
+            width={PET_SIZE}
+            height={PET_SIZE}
+            draggable={false}
+            alt={save.name}
+            style={{ position: "absolute", inset: 0, zIndex: 1, filter: save.isSleeping ? "brightness(0.8)" : undefined }}
+          />
+          {(blinking || save.isSleeping) && (
+            <img
+              src={BABY_LAYERS.wink}
+              width={PET_SIZE}
+              height={PET_SIZE}
+              draggable={false}
+              alt=""
+              style={{ position: "absolute", inset: 0, zIndex: 2 }}
+            />
+          )}
+        </div>
+      );
+    }
+    const stageSprites = SPRITES[save.evolutionStage];
+    if (!stageSprites) return null;
     const src =
       save.isSleeping && stageSprites.sleep
         ? stageSprites.sleep
         : blinking || save.isSleeping
           ? stageSprites.blink
           : stageSprites.idle;
-    visual = (
+    return (
       <img
         src={src}
         width={PET_SIZE}
@@ -1056,6 +1181,35 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         alt={save.name}
       />
     );
+  };
+
+  // Sprite selection: dead is an emoji (no cat art for that state). The
+  // still-waiting egg is small (EGG_IDLE_SIZE) and flashes/wiggles once
+  // ready to hatch. While the click-gated crack sequence is running
+  // (wiggle/crack1-3), this slot renders nothing — that part of the
+  // cutscene lives in the centered/enlarged hatch stage overlay instead.
+  // The instant the shell bursts, game.isEgg flips false and this slot
+  // goes straight back to rendering the REAL pet (renderPetSprite()) — it
+  // sits right in the shell and later jumps out by animating its own
+  // movement.x/y, never a decorative stand-in.
+  let visual: React.ReactNode;
+  if (!save.isAlive) {
+    visual = <span style={{ fontSize: 84, filter: "grayscale(1)" }}>🪦</span>;
+  } else if (game.isEgg && eggPhase === "idle") {
+    visual = (
+      <img
+        src={EGG_SPRITES.idle}
+        width={EGG_IDLE_SIZE}
+        height={EGG_IDLE_SIZE}
+        draggable={false}
+        className={game.canHatch ? "egg-anim-wiggle egg-anim-ready-flash" : undefined}
+        alt="Egg"
+      />
+    );
+  } else if (game.isEgg) {
+    visual = null;
+  } else {
+    visual = renderPetSprite();
   }
 
   const needsAttention =
@@ -1063,13 +1217,143 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     !save.isSleeping &&
     ((game.isEgg ? save.warmth : save.hunger) < 25 || save.cleanliness < 25 || save.happiness < 25);
 
-  // Evolving (hatch or stage-up) charges for 10s — a stand-in for real
-  // sprite art not existing yet — before the new stage is actually applied
-  // and briefly revealed with the star burst.
+  const spawnEggShards = useCallback((count: number) => {
+    setEggShards((prev) => [
+      ...prev,
+      ...Array.from({ length: count }, (_, i) => {
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        return {
+          id: Date.now() + i + Math.random(),
+          src: i % 2 === 0 ? eggShard1 : eggShard2,
+          dx: dir * (30 + Math.random() * 90),
+          // All shards settle on the same ground line the top shell falls
+          // to (HATCH_GROUND_DY), just with a little jitter.
+          dy: HATCH_GROUND_DY + (Math.random() * 16 - 8),
+          rotate: dir * (140 + Math.random() * 200),
+        };
+      }),
+    ]);
+  }, []);
+
+  // Egg -> baby ("hatch") is a click-gated cutscene: the player opens the
+  // radial menu on a ready egg and picks "Evolve!" (see radialActions
+  // below) to start it — moves the egg to a centered, 1.5x-enlarged "hatch
+  // stage" (hatchCenter/HATCH_SIZE) and starts it wiggling. Each further
+  // click on that centered egg advances one crack frame and throws more
+  // shell shards onto the ground than the last. The final click bursts the
+  // shell open — from there it's automatic: the REAL pet (game.isEgg is
+  // already false by then, so `visual` renders it normally) sits in the
+  // shell wiggling, then jumps out by animating its own movement.x/y in an
+  // arc — never a decorative stand-in — and the leftover shell + shards
+  // stay at hatchCenter, fading out a few seconds later.
+  const advanceHatch = useCallback(() => {
+    if (eggPhase === "idle") {
+      if (!game.canHatch) return;
+      setMenuOpen(false);
+      // Defensive reset: if a previous attempt was abandoned mid-sequence
+      // (e.g. reset to a fresh egg via the admin panel), this guarantees a
+      // clean slate instead of stray timers/motion values from that
+      // abandoned run corrupting the new one (see hatchTimersRef above —
+      // this was the actual cause of the hatch stage drifting rightward on
+      // repeated attempts).
+      clearHatchTimers();
+      setEggShards([]);
+      setPetSeatedWiggling(false);
+      setPetHappyWiggling(false);
+      setEggLeftoverFading(false);
+      eggTopX.set(0);
+      eggTopY.set(0);
+      eggTopRotate.set(0);
+
+      setHatchCenter({ x: window.innerWidth / 2 - HATCH_SIZE / 2, y: window.innerHeight / 2 - HATCH_SIZE / 2 });
+      setHatchCutsceneActive(true);
+      setIsEvolving(true);
+      setEggPhase("wiggle");
+      return;
+    }
+    if (eggPhase === "wiggle") {
+      setEggPhase("crack1");
+      spawnEggShards(2);
+      sfx(Sounds.playCrack);
+      return;
+    }
+    if (eggPhase === "crack1") {
+      setEggPhase("crack2");
+      spawnEggShards(3);
+      sfx(Sounds.playCrack);
+      return;
+    }
+    if (eggPhase === "crack2") {
+      setEggPhase("crack3");
+      spawnEggShards(4);
+      sfx(Sounds.playCrack);
+      return;
+    }
+    if (eggPhase !== "crack3") return;
+
+    // Final click: burst the shell open. Everything after this is timed,
+    // not click-gated.
+    setEggPhase("burst");
+    sfx(Sounds.playCrack);
+    sfx(Sounds.playEvolution);
+    game.hatchOrEvolve();
+    const t = EGG_HATCH_TIMING;
+
+    // Snap the REAL pet (not a copy) into the shell's center — this is
+    // what `visual` renders from here on, since game.isEgg is now false.
+    const center = hatchCenter;
+    const petOffset = (HATCH_SIZE - PET_SIZE) / 2;
+    const seatX = (center?.x ?? 0) + petOffset;
+    const seatY = (center?.y ?? 0) + petOffset;
+    movement.x.set(seatX);
+    movement.y.set(seatY);
+    setPetSeatedWiggling(true);
+
+    // Top shell: thrown farther and lands rotated a full 180deg (upside
+    // down), on the same ground line the shards settle on.
+    void animate(eggTopY, [0, -190, HATCH_GROUND_DY], { duration: 0.9, ease: ["easeOut", "easeIn"], times: [0, 0.4, 1] });
+    void animate(eggTopX, 60, { duration: 0.9, ease: "easeOut" });
+    void animate(eggTopRotate, 180, { duration: 0.9, ease: "easeOut" });
+
+    scheduleHatch(() => {
+      // Jump-out: the REAL pet's own position (movement.x/y) animates in
+      // an arc higher than the egg itself, landing just outside the
+      // shell — so what you see jumping IS the actual playable pet, not a
+      // decorative stand-in that later hands off to it.
+      setPetSeatedWiggling(false);
+      const landX = seatX + HATCH_SIZE * 0.62;
+      void animate(movement.y, [seatY, seatY - HATCH_SIZE * 1.15, seatY], {
+        duration: t.jumpMs / 1000,
+        ease: ["easeOut", "easeIn"],
+        times: [0, 0.4, 1],
+      });
+      void animate(movement.x, landX, { duration: t.jumpMs / 1000, ease: "easeOut" }).then(() => {
+        setPetHappyWiggling(true);
+        scheduleHatch(() => setPetHappyWiggling(false), t.happyMs);
+        setHatchCutsceneActive(false);
+        setIsEvolving(false);
+      });
+    }, t.seatedMs);
+
+    scheduleHatch(() => setEggLeftoverFading(true), t.seatedMs + t.jumpMs + t.wanderMs);
+    scheduleHatch(() => {
+      setEggLeftoverFading(false);
+      setEggPhase("idle");
+      setEggShards([]);
+      setHatchCenter(null);
+      eggTopX.set(0);
+      eggTopY.set(0);
+      eggTopRotate.set(0);
+    }, t.seatedMs + t.jumpMs + t.wanderMs + t.fadeMs);
+  }, [eggPhase, game, sfx, spawnEggShards, movement.x, movement.y, eggTopX, eggTopY, eggTopRotate, hatchCenter, clearHatchTimers, scheduleHatch]);
+
+  // Any later stage-up (baby->adult->final): no dedicated art yet, so it
+  // keeps the original 10s "charging" glow placeholder + flash reveal.
   const handleEvolve = useCallback(() => {
     if (petBusy) return;
     setMenuOpen(false);
     setIsEvolving(true);
+
     setTimeout(() => {
       setEvolvePulse(true);
       sfx(Sounds.playEvolution);
@@ -1082,11 +1366,17 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, [game, petBusy, sfx]);
 
   // Feed/Wash/Ball all live in the SideDock now — the radial menu only
-  // handles instant-click care actions. While asleep, the only meaningful
-  // action is waking up, so nothing else even shows.
-  const radialActions: RadialAction[] = save.isSleeping
-    ? [{ key: "sleep", icon: "☀️", label: "Wake", onClick: game.toggleSleep }]
-    : [
+  // handles instant-click care actions. A ready-to-hatch egg gets its own
+  // minimal menu (just "Evolve!", which kicks off advanceHatch) instead of
+  // the pet/sleep actions that don't apply to an egg. While asleep, the
+  // only meaningful action is waking up, so nothing else even shows.
+  const radialActions: RadialAction[] = game.isEgg
+    ? game.canHatch
+      ? [{ key: "evolve", icon: "🥚", label: "Evolve!", onClick: advanceHatch, highlight: true }]
+      : []
+    : save.isSleeping
+      ? [{ key: "sleep", icon: "☀️", label: "Wake", onClick: game.toggleSleep }]
+      : [
         {
           key: "pet",
           icon: "🤗",
@@ -1102,11 +1392,11 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         },
         { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
       ];
-  if (!save.isSleeping && game.canEvolve) {
+  if (!game.isEgg && !save.isSleeping && game.canEvolve) {
     radialActions.push({ key: "evolve", icon: "✨", label: "Evolve!", onClick: handleEvolve, highlight: true });
   }
 
-  const showRadial = !game.isEgg && save.isAlive && menuOpen && !petBusy;
+  const showRadial = save.isAlive && menuOpen && !petBusy && (!game.isEgg || game.canHatch);
 
   const idleBreathing =
     save.isAlive && !game.isEgg && !save.isSleeping && !movement.isMoving && !petBusy && !happyPulse && !evolvePulse;
@@ -1114,9 +1404,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const bodyClass = [
     movement.isMoving ? "pet-anim-walk" : "",
     feedPhase === "eating" ? "pet-anim-eat" : "",
-    happyPulse ? "pet-anim-happy" : "",
+    happyPulse || petHappyWiggling ? "pet-anim-happy" : "",
     evolvePulse ? "pet-anim-evolve" : "",
-    isEvolving ? "pet-anim-charging" : "",
+    // The generic "charging" glow is only a stand-in for stages without
+    // real art (baby->adult->final) — the egg hatch has real per-phase
+    // frames, so it's excluded here (eggPhase leaves "idle" for the whole
+    // hatch sequence, including its post-burst settle/wander/fade tail).
+    isEvolving && eggPhase === "idle" ? "pet-anim-charging" : "",
+    petSeatedWiggling ? "egg-anim-wiggle" : "",
     idleBreathing ? "pet-anim-idle-breathe" : "",
     game.isEgg && game.isEggOverheating ? "pet-anim-overheat" : "",
   ]
@@ -1406,9 +1701,49 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         </>
       )}
 
+      {/* Egg's "back" panel during the burst: a separate, lower z-index
+          sibling of the pet's own container (see the ordering note on the
+          pet container's style below) so the real pet visually sits in
+          FRONT of it, between back and the bottom/top/shards group. */}
+      {hatchCenter && eggPhase === "burst" && (
+        <motion.div
+          style={{
+            position: "fixed",
+            left: 0,
+            top: 0,
+            width: HATCH_SIZE,
+            height: HATCH_SIZE,
+            x: hatchCenter.x,
+            y: hatchCenter.y,
+            pointerEvents: "none",
+            zIndex: 940,
+          }}
+          initial={{ opacity: 1 }}
+          animate={{ opacity: eggLeftoverFading ? 0 : 1 }}
+          transition={{ duration: EGG_HATCH_TIMING.fadeMs / 1000 }}
+        >
+          <img src={eggBack} width={HATCH_SIZE} height={HATCH_SIZE} draggable={false} alt="" />
+        </motion.div>
+      )}
+
       <motion.div
         data-interactive
-        style={{ position: "fixed", left: 0, top: 0, width: PET_SIZE, height: PET_SIZE, x: movement.x, y: movement.y }}
+        style={{
+          position: "fixed",
+          left: 0,
+          top: 0,
+          width: PET_SIZE,
+          height: PET_SIZE,
+          x: movement.x,
+          y: movement.y,
+          // While seated in the burst shell, this container needs to paint
+          // BETWEEN the back panel (940, above) and the bottom/top/shards
+          // group (950, below) — those are separate top-level siblings
+          // now (see the containing-block note on the hatch stage below),
+          // so their z-index only compares correctly against this
+          // container's own z-index, not one set on a descendant of it.
+          zIndex: eggPhase === "burst" ? 945 : undefined,
+        }}
         {...(save.isAlive && !petBusy ? petDragHandlers : {})}
       >
         {/* Status blip above the pet — sleeping already has PetEffects' own
@@ -1488,27 +1823,29 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           that entirely.
         */}
         <motion.div
-          // A ready-to-hatch egg has no radial menu (eggs only hold-to-warm),
-          // so a plain tap is its hatch trigger — a quick tap never becomes
-          // a "hold" (startWarmHold's interval hasn't ticked yet), so this
-          // can't be mistaken for warming.
+          // A ready-to-hatch egg opens the radial menu just like a hatched
+          // pet does — "Evolve!" lives there (see radialActions) rather
+          // than being a direct tap on the egg. Once the hatch cutscene
+          // starts (hatchCutsceneActive), this container goes inert for
+          // clicks while pre-burst (the centered hatch stage owns clicks
+          // then); it becomes the real interactive pet again as soon as
+          // the shell bursts, just elevated above the shell (zIndex) so
+          // it's visible sitting in it.
           onClick={
-            game.isEgg
-              ? game.canHatch && !petBusy
-                ? handleEvolve
-                : undefined
-              : petBusy
+            hatchCutsceneActive || petBusy
+              ? undefined
+              : game.isEgg && !game.canHatch
                 ? undefined
                 : () => {
-                    setMenuOpen((o) => {
-                      if (!o) sfx(Sounds.playSwish);
-                      return !o;
-                    });
-                  }
+                  setMenuOpen((o) => {
+                    if (!o) sfx(Sounds.playSwish);
+                    return !o;
+                  });
+                }
           }
-          onPointerDown={game.isEgg && save.isAlive && !petBusy ? startWarmHold : undefined}
-          onPointerUp={game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
-          onPointerLeave={game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
+          onPointerDown={!hatchCutsceneActive && game.isEgg && save.isAlive && !petBusy ? startWarmHold : undefined}
+          onPointerUp={!hatchCutsceneActive && game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
+          onPointerLeave={!hatchCutsceneActive && game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
           style={{
             cursor: "pointer",
             width: PET_SIZE,
@@ -1517,6 +1854,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             alignItems: "center",
             justifyContent: "center",
             userSelect: "none",
+            pointerEvents: hatchCutsceneActive && eggPhase !== "burst" ? "none" : "auto",
             x: leanX,
             y: leanY,
             scaleX: movement.facing === "left" ? -1 : 1,
@@ -1583,6 +1921,144 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           </div>
         )}
       </motion.div>
+
+      {/* Hatch stage: centered + enlarged (HATCH_SIZE = 1.5x PET_SIZE),
+          fully decoupled from the pet's own wander position. Click-gated
+          through crack3; at "burst" the shell splits into just its
+          pieces (back/bottom/top/shards) — the pet itself is NOT
+          rendered here at all. It's the real pet's own container
+          (above) that shows it sitting in the shell and later jumping
+          out, elevated above this stage via zIndex, so what you see is
+          always the actual playable pet, never a decorative stand-in.
+
+          Deliberately rendered as a SIBLING of the pet's own draggable
+          container, not a descendant of it: that container's `x`/`y`
+          motion values compile to a CSS `transform`, and any `position:
+          fixed` descendant of an element with a `transform` positions
+          itself relative to THAT element instead of the viewport (a CSS
+          spec quirk, not a framer-motion bug). Nesting this overlay
+          inside the pet's container was the actual cause of the hatch
+          stage appearing off-center and drifting further right on each
+          retry (offset by wherever the pet's wander/drag last left
+          movement.x/y), and of dragging the pet also dragging the shell —
+          moving it out here makes hatchCenter genuinely viewport-fixed. */}
+      {hatchCenter && eggPhase !== "idle" && (
+        <motion.div
+          data-interactive
+          onClick={eggPhase !== "burst" ? advanceHatch : undefined}
+          style={{
+            position: "fixed",
+            left: 0,
+            top: 0,
+            width: HATCH_SIZE,
+            height: HATCH_SIZE,
+            x: hatchCenter.x,
+            y: hatchCenter.y,
+            cursor: eggPhase !== "burst" ? "pointer" : "default",
+            pointerEvents: eggPhase === "burst" ? "none" : "auto",
+            zIndex: 950,
+          }}
+          initial={{ opacity: 1 }}
+          animate={{ opacity: eggLeftoverFading ? 0 : 1 }}
+          transition={{ duration: EGG_HATCH_TIMING.fadeMs / 1000 }}
+        >
+          {eggPhase !== "burst" ? (
+            <img
+              src={
+                eggPhase === "crack3"
+                  ? EGG_SPRITES.crack3
+                  : eggPhase === "crack2"
+                    ? EGG_SPRITES.crack2
+                    : eggPhase === "crack1"
+                      ? EGG_SPRITES.crack1
+                      : EGG_SPRITES.idle
+              }
+              width={HATCH_SIZE}
+              height={HATCH_SIZE}
+              draggable={false}
+              className="egg-anim-wiggle"
+              style={eggPhase === "crack3" ? { animationDuration: "0.28s" } : undefined}
+              alt="Egg"
+            />
+          ) : (
+            <>
+              {/* eggBack itself is rendered as its own lower-z-index sibling
+                  now (see above) so the real pet can sit in front of it —
+                  only bottom/top/shards (all meant to sit IN FRONT of the
+                  pet) belong in this front-layer group. */}
+              <img
+                src={eggBottom}
+                width={HATCH_SIZE}
+                height={HATCH_SIZE}
+                draggable={false}
+                alt=""
+                style={{ position: "absolute", inset: 0, zIndex: 2 }}
+              />
+              <motion.img
+                src={eggTop}
+                width={HATCH_SIZE}
+                height={HATCH_SIZE}
+                draggable={false}
+                alt=""
+                style={{ position: "absolute", inset: 0, zIndex: 3, x: eggTopX, y: eggTopY, rotate: eggTopRotate }}
+              />
+            </>
+          )}
+          {eggShards.map((s) => (
+            <motion.img
+              key={s.id}
+              src={s.src}
+              width={120}
+              height={120}
+              draggable={false}
+              alt=""
+              style={{ position: "absolute", left: HATCH_SIZE / 2 - 60, top: HATCH_SIZE / 2 - 60, zIndex: 4 }}
+              initial={{ x: 0, y: 0, opacity: 1, scale: 0.6, rotate: 0 }}
+              animate={{ x: s.dx, y: s.dy, opacity: 1, scale: 1, rotate: s.rotate }}
+              transition={{ duration: 0.6, ease: "easeOut" }}
+            />
+          ))}
+        </motion.div>
+      )}
+
+      {/* "Help me hatch!" nudge — text only, no pointing arrow, and it
+          disappears the instant the player has clicked the egg once
+          (eggPhase leaves "wiggle" for crack1/2/3) rather than lingering
+          through the whole crack sequence. Sibling of the pet container
+          for the same containing-block reason as the hatch stage above. */}
+      {hatchCenter && eggPhase === "wiggle" && (
+        <motion.div
+          style={{
+            position: "fixed",
+            left: 0,
+            top: 0,
+            x: hatchCenter.x + HATCH_SIZE / 2 - 90,
+            y: hatchCenter.y - 40,
+            width: 180,
+            pointerEvents: "none",
+            zIndex: 951,
+            display: "flex",
+            justifyContent: "center",
+          }}
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+        >
+          <div
+            style={{
+              background: "rgba(20,20,26,0.9)",
+              color: "#fde68a",
+              padding: "5px 12px",
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Help me hatch! Click me!
+          </div>
+        </motion.div>
+      )}
     </>
   );
 }

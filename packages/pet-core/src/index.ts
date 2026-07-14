@@ -12,3 +12,5 @@ export * from "./decay";
 export * from "./quests";
 export * from "./achievements";
 export * from "./battle";
+export * from "./history";
+export * from "./minigames/targetToss";

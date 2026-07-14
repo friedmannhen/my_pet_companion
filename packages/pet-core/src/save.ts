@@ -174,13 +174,20 @@ export function normalizePetSave(
     ...save,
     petType: type,
     hatched: save.hatched ?? (save.carePoints ?? 0) >= 200,
+    // Saves that predate the egg-picker already have a pet in progress — only
+    // a genuinely fresh save (freshPetSave) starts with eggChosen: false.
+    eggChosen: save.eggChosen ?? true,
     warmth: save.warmth ?? save.hunger ?? 50,
     carePointsFloor: save.carePointsFloor ?? 0,
+    // Eggs don't sleep (they go dormant instead, see replayOfflineGap) — wake
+    // any legacy sleeping-egg save on load.
+    isSleeping: save.evolutionStage === 0 ? false : save.isSleeping,
     // Legacy saves predate manual/auto sleep distinction — treat any persisted
     // sleep as "auto" (unprotected) since we have no tuck-in start time for it.
-    sleepKind: save.isSleeping ? (save.sleepKind ?? "auto") : undefined,
-    sleepStartedAt: save.isSleeping ? save.sleepStartedAt : undefined,
+    sleepKind: save.isSleeping && save.evolutionStage !== 0 ? (save.sleepKind ?? "auto") : undefined,
+    sleepStartedAt: save.isSleeping && save.evolutionStage !== 0 ? save.sleepStartedAt : undefined,
     quests: normalizePetQuestState(save.quests, date, calendar),
+    history: Array.isArray(save.history) ? save.history : [],
   };
 }
 
@@ -222,6 +229,7 @@ export function freshPetSave(
     carePoints: 0,
     carePointsFloor: 0,
     hatched: false,
+    eggChosen: false,
 
     isAlive: true,
     isSleeping: false,
@@ -237,6 +245,7 @@ export function freshPetSave(
     lastPetted: n,
     lastInteraction: n,
     quests: freshPetQuestState(date, calendar),
+    history: [],
   };
 
   return overrides ? { ...base, ...overrides } : base;

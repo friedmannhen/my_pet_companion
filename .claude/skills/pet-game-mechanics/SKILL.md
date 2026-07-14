@@ -282,6 +282,46 @@ on distinguishing it from `"released"`/`"playing"`.
   it; if you see a walk-related hang, the watchdog firing (a `console.warn`)
   tells you the hang is happening AT the walk step vs. before it.
 
+## Display scale — the robust centering mechanism (Jul 2026)
+
+Hatched pets render at 0.7 of the 128px cell (`PET_DISPLAY_SCALE` in
+GameView.tsx), the idle egg at 0.5 (`EGG_IDLE_SIZE`). **NEVER shrink sprite
+`<img>` width/height to scale a pet** — that was tried and it broke every
+position tuned against the cell (menus, rain, panels). The mechanism: the
+sprite always renders at the FULL cell size and a dedicated wrapper applies
+`transform: scale()` with center origin. Transforms don't affect layout, so
+the cell (movement math, drag hitboxes, PetEffects' `inset: 0` overlay,
+panel anchors) never changes and the art stays dead-center at any scale.
+The wrapper is its own node because bodyClass's CSS keyframe transforms
+would otherwise fight it. Scale stays 1 through the entire egg/hatch
+cutscene and springs to 0.7 only when `hatchCutsceneActive` clears (the
+jump-out moment). `RemotePets.tsx` mirrors the same cell+transform approach
+(`REMOTE_SIZE`/`REMOTE_DISPLAY_SCALE`) and derives its label/bubble/menu
+offsets from the scaled visual's computed edges (`REMOTE_VISUAL_TOP/BOTTOM`).
+
+## Egg warm mode (replaces the old hold-on-egg gesture, Jul 2026)
+
+During the egg phase the SideDock kitchen hides food/ball and shows a 💡
+lamp instead; clicking it enters `warmingMode` in GameView — same bounded-
+modal shape as wash-scrub (`setClickableOverride(true)`, OS focus for
+Escape, right-click/Esc/✕ exits, `warmingMode` is part of `petBusy`). The
+cursor becomes a layered glow orb that swells while `warmHeld` (holding
+left button over the egg's padded cell box) and turns red on
+`isEggOverheating`. The hold runs the same `startWarmHold`/`stopWarmHold`
+200ms `warmTick` loop the direct gesture used; `warmHeldRef` is the
+synchronous source of truth (ref-mirror pattern, see the useConsumables
+footgun). There is NO direct pointer-hold on the egg sprite anymore.
+Related: eggs never sleep — they go "dormant" (see replayOfflineGap's egg
+branch in pet-core decay.ts) and cannot die; 0 warmth just stalls hatch
+progress.
+
+## throwArc lives in throwPhysics.ts
+
+The ballistic parabola was extracted verbatim from GameView.tsx to
+`apps/desktop/src/game/throwPhysics.ts` so the Target Toss minigame replays
+the exact same flight. Feed/ball import it from there — don't re-inline or
+fork the formula.
+
 ## Quick-reference gotcha list
 
 - Never trust a `setState` updater's side-effect return value synchronously

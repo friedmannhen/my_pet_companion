@@ -16,6 +16,7 @@ export interface PetRow {
   care_points: number;
   care_points_floor: number;
   hatched: boolean;
+  egg_chosen: boolean;
   is_alive: boolean;
   is_sleeping: boolean;
   sleep_kind: "manual" | "auto" | null;
@@ -46,6 +47,7 @@ export function saveToRow(save: PetSaveData, userId: string): PetRow {
     care_points: save.carePoints,
     care_points_floor: save.carePointsFloor ?? 0,
     hatched: save.hatched ?? false,
+    egg_chosen: save.eggChosen ?? true,
     is_alive: save.isAlive,
     is_sleeping: save.isSleeping,
     sleep_kind: save.sleepKind ?? null,
@@ -76,6 +78,7 @@ export function rowToSave(row: PetRow): PetSaveData {
     carePoints: Number(row.care_points),
     carePointsFloor: Number(row.care_points_floor),
     hatched: row.hatched,
+    eggChosen: row.egg_chosen,
     isAlive: row.is_alive,
     isSleeping: row.is_sleeping,
     sleepKind: row.sleep_kind ?? undefined,

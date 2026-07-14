@@ -6,6 +6,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../supabase/client";
 
+// Ranking metrics, mirroring the old hub's leaderboard filter pills — only
+// the ones this schema can serve from the pets row are kept.
+export type LeaderboardMetric = "carePoints" | "evolutionStage" | "interactions";
+
+export const LEADERBOARD_METRICS: { metric: LeaderboardMetric; label: string; icon: string }[] = [
+  { metric: "carePoints", label: "Care Points", icon: "💠" },
+  { metric: "evolutionStage", label: "Evolution", icon: "✨" },
+  { metric: "interactions", label: "Interactions", icon: "🤝" },
+];
+
 export interface LeaderboardEntry {
   userId: string;
   displayName: string;
@@ -13,6 +23,8 @@ export interface LeaderboardEntry {
   petType: string;
   evolutionStage: number;
   carePoints: number;
+  /** feed + wash + pet + ball throws — the "Interactions" metric. */
+  interactions: number;
   isSelf: boolean;
 }
 
@@ -30,6 +42,10 @@ interface PetsRankRow {
   pet_type: string;
   evolution_stage: number;
   care_points: number;
+  feed_count: number;
+  wash_count: number;
+  pet_count: number;
+  throw_ball_count: number;
 }
 
 interface ProfileRow {
@@ -51,7 +67,7 @@ function displayNameOf(profile: ProfileRow | undefined): string {
   return profile.email.split("@")[0] ?? profile.email;
 }
 
-export function useLeaderboard(userId: string | null, active: boolean) {
+export function useLeaderboard(userId: string | null, active: boolean, metric: LeaderboardMetric = "carePoints") {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [hallOfFame, setHallOfFame] = useState<HallOfFameEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -64,9 +80,12 @@ export function useLeaderboard(userId: string | null, active: boolean) {
     const [petsRes, hofRes] = await Promise.all([
       supabase
         .from("pets")
-        .select("user_id, name, pet_type, evolution_stage, care_points")
+        .select("user_id, name, pet_type, evolution_stage, care_points, feed_count, wash_count, pet_count, throw_ball_count")
+        // One indexed fetch serves every metric: pull a wider page ordered by
+        // care_points, re-rank client-side below. Fine at this player count;
+        // revisit with a proper DB-side order-by if pages start clipping.
         .order("care_points", { ascending: false })
-        .limit(20),
+        .limit(50),
       supabase
         .from("hall_of_fame")
         .select("milestone_key, user_id, pet_type, claimed_at")
@@ -89,17 +108,21 @@ export function useLeaderboard(userId: string | null, active: boolean) {
     }
     const byId = new Map(profiles.map((p) => [p.id, p]));
 
-    setEntries(
-      pets.map((p) => ({
-        userId: p.user_id,
-        displayName: displayNameOf(byId.get(p.user_id)),
-        petName: p.name,
-        petType: p.pet_type,
-        evolutionStage: p.evolution_stage,
-        carePoints: Number(p.care_points),
-        isSelf: p.user_id === userId,
-      })),
-    );
+    const mapped = pets.map((p) => ({
+      userId: p.user_id,
+      displayName: displayNameOf(byId.get(p.user_id)),
+      petName: p.name,
+      petType: p.pet_type,
+      evolutionStage: p.evolution_stage,
+      carePoints: Number(p.care_points),
+      interactions: (p.feed_count ?? 0) + (p.wash_count ?? 0) + (p.pet_count ?? 0) + (p.throw_ball_count ?? 0),
+      isSelf: p.user_id === userId,
+    }));
+    const valueOf = (e: LeaderboardEntry) =>
+      metric === "evolutionStage" ? e.evolutionStage : metric === "interactions" ? e.interactions : e.carePoints;
+    // care_points as the stable tiebreak so equal stages/counts still rank sensibly.
+    mapped.sort((a, b) => valueOf(b) - valueOf(a) || b.carePoints - a.carePoints);
+    setEntries(mapped.slice(0, 20));
     setHallOfFame(
       hof.map((h) => ({
         milestoneKey: h.milestone_key,
@@ -110,7 +133,7 @@ export function useLeaderboard(userId: string | null, active: boolean) {
       })),
     );
     setLoading(false);
-  }, [userId]);
+  }, [userId, metric]);
 
   useEffect(() => {
     if (active) void refresh();

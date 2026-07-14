@@ -97,6 +97,11 @@ function createOverlay(): void {
   ipcMain.on("overlay:set-focusable", (_evt, focusable: boolean) => {
     if (!overlay) return;
     overlay.setFocusable(focusable);
+    // Windows quirk: toggling focusable re-creates the taskbar button even
+    // though the window was created with skipTaskbar: true — re-assert it on
+    // every toggle or the app icon pops into the taskbar whenever a text
+    // input (settings/groups views) grabs focus.
+    overlay.setSkipTaskbar(true);
     if (focusable) overlay.focus();
   });
 

@@ -178,6 +178,42 @@ describe("replayOfflineGap", () => {
     expect(out.isAlive).toBe(false);
   });
 
+  it("eggs never sleep: long idle gap ends dormant-but-awake, cooling at the sleep rate", () => {
+    const s = saveAt({ evolutionStage: 0, warmth: 90 });
+    // 3h gap, fresh lastInteraction: 60 attended min at awake rate, then
+    // 120 dormant min at the (gentler) sleep rate — but isSleeping stays false.
+    const now = new Date(T0.getTime() + 3 * 3_600_000);
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.isSleeping).toBe(false);
+    expect(out.sleepKind).toBeUndefined();
+    expect(out.warmth).toBeCloseTo(90 - 0.5 * 60 - (1 / 15) * 120, 5);
+    expect(out.isAlive).toBe(true);
+  });
+
+  it("eggs never die: warmth bottoms out at 0 with the pet still alive", () => {
+    const s = saveAt({ evolutionStage: 0, warmth: 5 });
+    const now = new Date(T0.getTime() + 24 * 3_600_000);
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.warmth).toBe(0);
+    expect(out.isAlive).toBe(true);
+    expect(out.isSleeping).toBe(false);
+  });
+
+  it("wakes a legacy sleeping-egg save", () => {
+    const s = saveAt({
+      evolutionStage: 0,
+      warmth: 80,
+      isSleeping: true,
+      sleepKind: "auto",
+      sleepStartedAt: T0.toISOString(),
+    });
+    const now = new Date(T0.getTime() + 2 * 3_600_000);
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.isSleeping).toBe(false);
+    // Already "sleeping" at close → whole gap is dormant cooling.
+    expect(out.warmth).toBeCloseTo(80 - (1 / 15) * 120, 5);
+  });
+
   it("applies the low-stat care-point penalty for unprotected gaps", () => {
     const s = saveAt({
       evolutionStage: 1,

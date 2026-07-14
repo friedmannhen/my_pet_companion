@@ -27,6 +27,7 @@ import {
   WEEKLY_QUEST_TARGET_DAYS,
   countQualifiedDays,
   describeReward,
+  type HistoryEventCategory,
   type PetQuestCode,
   type PetSaveData,
   type QuestClaimState,
@@ -38,9 +39,68 @@ import type { AuthState } from "../supabase/useAuth";
 import type { SessionLease } from "../session/useSessionLease";
 import type { RibbonSide } from "./useRibbonPrefs";
 import type { FollowSpeed } from "./useGamePrefs";
-import { useLeaderboard } from "./useLeaderboard";
+import { useLeaderboard, LEADERBOARD_METRICS, type LeaderboardMetric } from "./useLeaderboard";
+import { useFriends, type PlayerSearchResult } from "./useFriends";
 import type { GroupInfo, UseGroups } from "./useGroups";
+import { supabase } from "../supabase/client";
 import "./hud.css";
+
+// Observes live presence count for a single group's room, without joining it
+// or tracking the viewer's own presence. Lazy/on-demand (pass null when the
+// row isn't expanded) so the groups menu doesn't open one Realtime channel
+// per group just to show a member count.
+//
+// CRITICAL supabase-js behavior this must respect: `supabase.channel(topic)`
+// dedupes by topic and returns the EXISTING instance if one exists — and
+// removing a channel deregisters by TOPIC, not instance. So if the player is
+// currently IN this group's room (useRoom owns a `pet-room:<id>` channel),
+// creating/subscribing/removing our own "observer" here would hijack and
+// then kill the live room connection. Instead: if a channel for the topic
+// already exists, piggyback on it read-only (poll its presenceState, touch
+// nothing); only create + own a channel when the topic is free, and only
+// remove it if we're still the registered instance for the topic.
+function useGroupPresenceCount(groupId: string | null): number | null {
+  const [count, setCount] = useState<number | null>(null);
+  const [nonce, setNonce] = useState(0);
+  useEffect(() => {
+    setCount(null);
+    if (!supabase || !groupId) return;
+    const topic = `realtime:pet-room:${groupId}`;
+    const existing = supabase.getChannels().find((c) => c.topic === topic);
+
+    if (existing) {
+      // Someone else (the live room, usually) owns this topic — read only.
+      const read = () => {
+        const current = supabase!.getChannels().find((c) => c.topic === topic);
+        if (current !== existing) {
+          // Owner changed/removed — re-run the effect to rebind correctly.
+          setNonce((n) => n + 1);
+          return;
+        }
+        setCount(Object.keys(existing.presenceState()).length);
+      };
+      read();
+      const id = setInterval(read, 1000);
+      return () => clearInterval(id);
+    }
+
+    const channel = supabase.channel(`pet-room:${groupId}`, {
+      config: { presence: { key: `observer-${Math.random().toString(36).slice(2)}` } },
+    });
+    channel.on("presence", { event: "sync" }, () => {
+      setCount(Object.keys(channel.presenceState()).length);
+    });
+    channel.subscribe();
+    return () => {
+      // Only tear down if we're still the registered channel for this topic —
+      // if useRoom's join() replaced us, removing our stale instance would
+      // deregister the live room channel (removal filters by topic).
+      const current = supabase!.getChannels().find((c) => c.topic === topic);
+      if (current === channel) void supabase!.removeChannel(channel);
+    };
+  }, [groupId, nonce]);
+  return count;
+}
 
 const rules = DEFAULT_PET_RULES;
 const STAGE_NAMES = ["Egg", "Baby", "Adult", "Final"];
@@ -57,6 +117,15 @@ const FOOD_PILE_LAYOUT = [
   { x: -4, y: -7, rotate: 18 },
   { x: 16, y: -4, rotate: -6 },
 ];
+
+const HISTORY_CATEGORY_ICON: Record<HistoryEventCategory, string> = {
+  care: "💛",
+  quest: "🎯",
+  achievement: "🏆",
+  evolution: "🥚",
+  penalty: "⚠️",
+  social: "👥",
+};
 
 const SYNC_COLOR: Record<string, string> = {
   offline: "#9ca3af",
@@ -274,6 +343,9 @@ export interface SideDockProps {
   onGrabBall: (e: React.PointerEvent) => void;
   canClean: boolean;
   onStartClean: () => void;
+  /** Egg phase only — enters warm mode (cursor becomes a light source). */
+  canWarm: boolean;
+  onStartWarm: () => void;
   soundEnabled: boolean;
   onToggleSound: () => void;
   followSpeed: FollowSpeed;
@@ -315,6 +387,8 @@ export function SideDock({
   onGrabBall,
   canClean,
   onStartClean,
+  canWarm,
+  onStartWarm,
   soundEnabled,
   onToggleSound,
   followSpeed,
@@ -334,10 +408,13 @@ export function SideDock({
   onLeaveRoom,
 }: SideDockProps) {
   const { save } = game;
-  const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "groups" | "settings">("home");
+  const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "groups" | "friends" | "history" | "settings">("home");
   const [groupNameDraft, setGroupNameDraft] = useState("");
   const [joinCodeDraft, setJoinCodeDraft] = useState("");
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const expandedPresenceCount = useGroupPresenceCount(expandedGroupId);
   const [nameDraft, setNameDraft] = useState(save.name);
   const [renameSaved, setRenameSaved] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(auth.displayName ?? "");
@@ -353,7 +430,7 @@ export function SideDock({
   // window is non-focusable by default — see main.ts). Granted only while a
   // typing-capable view is actually open, same bounded-interaction pattern
   // as wash-scrub and the auth card.
-  const settingsActive = open && (view === "settings" || view === "groups");
+  const settingsActive = open && (view === "settings" || view === "groups" || view === "friends");
   useEffect(() => {
     if (!settingsActive) return;
     window.overlay.setFocusable(true);
@@ -368,7 +445,27 @@ export function SideDock({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsActive]);
-  const leaderboard = useLeaderboard(auth.userId, open && view === "ranks");
+  const [rankMetric, setRankMetric] = useState<LeaderboardMetric>("carePoints");
+  const leaderboard = useLeaderboard(auth.userId, open && view === "ranks", rankMetric);
+  // Fetched whenever the dock opens (not just the friends view) so the nav
+  // badge can show pending incoming requests.
+  const friendsApi = useFriends(auth.userId, open);
+  const [friendQuery, setFriendQuery] = useState("");
+  const [friendResults, setFriendResults] = useState<PlayerSearchResult[]>([]);
+  useEffect(() => {
+    if (view !== "friends") return;
+    const q = friendQuery.trim();
+    if (q.length < 2) {
+      setFriendResults([]);
+      return;
+    }
+    // Debounced autocomplete against profiles.name.
+    const id = setTimeout(() => {
+      void friendsApi.search(q).then(setFriendResults);
+    }, 250);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [friendQuery, view]);
   const claimableTotal = game.claimableQuestCount + game.achievements.claimableCount;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tabY = useMotionValue(y);
@@ -550,6 +647,8 @@ export function SideDock({
                 { key: "awards", icon: "🏆", label: "Achievements", badge: game.achievements.claimableCount },
                 { key: "ranks", icon: "🌍", label: "Leaderboard & hall of fame", badge: 0 },
                 { key: "groups", icon: "👥", label: "Groups & online rooms", badge: 0 },
+                { key: "friends", icon: "🤝", label: "Friends", badge: friendsApi.incoming.length },
+                { key: "history", icon: "🕓", label: "History", badge: 0 },
               ] as const
             ).map((nav) => (
               <button
@@ -765,11 +864,20 @@ export function SideDock({
                   </button>
                 )}
                 <div style={{ fontSize: 11, opacity: 0.5 }}>{auth.email}</div>
-                <button style={{ ...chipStyle, textAlign: "left" }} onClick={onSignOut}>
-                  Sign out
+                {/* Both are "leaving" actions so both read red — sign out the
+                    softer shade (account-level), quit the harsher one (kills
+                    the whole overlay). */}
+                <button
+                  style={{ ...chipStyle, textAlign: "left", background: "rgba(248,113,113,0.22)", color: "#fca5a5" }}
+                  onClick={onSignOut}
+                >
+                  🚪 Sign out
                 </button>
-                <button style={{ ...chipStyle, textAlign: "left", opacity: 0.7 }} onClick={onQuit}>
-                  Quit
+                <button
+                  style={{ ...chipStyle, textAlign: "left", background: "rgba(153,27,27,0.45)", color: "#f87171" }}
+                  onClick={onQuit}
+                >
+                  ⛔ Quit
                 </button>
               </div>
             </section>
@@ -837,7 +945,10 @@ export function SideDock({
                       </strong>
                       {claimable ? (
                         <button
-                          onClick={() => game.achievements.claim(code)}
+                          onClick={() => {
+                            game.achievements.claim(code);
+                            game.logHistoryEvent({ category: "achievement", label: `Achievement claimed: ${def.title}` });
+                          }}
                           style={{
                             cursor: "pointer",
                             border: "none",
@@ -912,6 +1023,9 @@ export function SideDock({
               )}
               {groupsApi.groups.map((g) => {
                 const inThisRoom = activeRoomGroupId === g.id;
+                const isOwner = g.role === "owner" && g.groupType !== "global";
+                const isExpanded = expandedGroupId === g.id;
+                const isConfirmingDelete = confirmingDeleteId === g.id;
                 return (
                   <div
                     key={g.id}
@@ -924,8 +1038,12 @@ export function SideDock({
                     }}
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                      <strong style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {g.groupType === "global" ? "🌍" : "👥"} {g.name}
+                      <strong
+                        style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}
+                        onClick={() => setExpandedGroupId((id) => (id === g.id ? null : g.id))}
+                        title="Show who's live in this room"
+                      >
+                        {g.groupType === "global" ? "🌍" : "👥"} {g.name} {isExpanded ? "▲" : "▼"}
                       </strong>
                       {inThisRoom ? (
                         <button style={{ ...chipStyle, background: "rgba(248,113,113,0.35)", flexShrink: 0 }} onClick={onLeaveRoom}>
@@ -963,6 +1081,49 @@ export function SideDock({
                       {g.groupType === "global" && <span>Everyone is here automatically.</span>}
                       <span style={{ marginLeft: "auto", opacity: 0.6 }}>{g.role}</span>
                     </div>
+                    {isExpanded && (
+                      <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 10, opacity: 0.8 }}>
+                        {expandedPresenceCount === null
+                          ? "Checking who's live…"
+                          : expandedPresenceCount === 0
+                            ? "Nobody is in this room right now."
+                            : `${expandedPresenceCount} ${expandedPresenceCount === 1 ? "person" : "people"} live in this room right now.`}
+                      </div>
+                    )}
+                    {isOwner && (
+                      <div style={{ marginTop: 6 }}>
+                        {isConfirmingDelete ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10 }}>
+                            <span style={{ opacity: 0.8 }}>Delete this group? Everyone will be removed.</span>
+                            <button
+                              style={{ ...chipStyle, padding: "1px 6px", fontSize: 10, background: "rgba(248,113,113,0.45)" }}
+                              onClick={() => {
+                                if (inThisRoom) onLeaveRoom();
+                                setConfirmingDeleteId(null);
+                                void groupsApi.deleteGroup(g.id).then((ok) => {
+                                  if (ok) game.logHistoryEvent({ category: "social", label: `Deleted group "${g.name}"` });
+                                });
+                              }}
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              style={{ ...chipStyle, padding: "1px 6px", fontSize: 10 }}
+                              onClick={() => setConfirmingDeleteId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            style={{ ...chipStyle, padding: "1px 6px", fontSize: 10, background: "rgba(248,113,113,0.2)" }}
+                            onClick={() => setConfirmingDeleteId(g.id)}
+                          >
+                            Delete group
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -979,7 +1140,11 @@ export function SideDock({
                   onChange={(e) => setGroupNameDraft(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && groupNameDraft.trim().length >= 2) {
-                      void groupsApi.create(groupNameDraft).then(() => setGroupNameDraft(""));
+                      const nameAtSubmit = groupNameDraft;
+                      void groupsApi.create(groupNameDraft).then((created) => {
+                        setGroupNameDraft("");
+                        if (created) game.logHistoryEvent({ category: "social", label: `Created group "${nameAtSubmit}"` });
+                      });
                     }
                   }}
                   maxLength={40}
@@ -998,7 +1163,13 @@ export function SideDock({
                 <button
                   style={{ ...chipStyle, opacity: groupNameDraft.trim().length >= 2 ? 1 : 0.5 }}
                   disabled={groupNameDraft.trim().length < 2}
-                  onClick={() => void groupsApi.create(groupNameDraft).then(() => setGroupNameDraft(""))}
+                  onClick={() => {
+                    const nameAtSubmit = groupNameDraft;
+                    void groupsApi.create(groupNameDraft).then((created) => {
+                      setGroupNameDraft("");
+                      if (created) game.logHistoryEvent({ category: "social", label: `Created group "${nameAtSubmit}"` });
+                    });
+                  }}
                 >
                   Create
                 </button>
@@ -1016,7 +1187,10 @@ export function SideDock({
                   onChange={(e) => setJoinCodeDraft(e.target.value.toUpperCase())}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && joinCodeDraft.trim().length >= 4) {
-                      void groupsApi.join(joinCodeDraft).then(() => setJoinCodeDraft(""));
+                      void groupsApi.join(joinCodeDraft).then((joined) => {
+                        setJoinCodeDraft("");
+                        if (joined) game.logHistoryEvent({ category: "social", label: `Joined group "${joined.name}"` });
+                      });
                     }
                   }}
                   maxLength={8}
@@ -1036,7 +1210,12 @@ export function SideDock({
                 <button
                   style={{ ...chipStyle, opacity: joinCodeDraft.trim().length >= 4 ? 1 : 0.5 }}
                   disabled={joinCodeDraft.trim().length < 4}
-                  onClick={() => void groupsApi.join(joinCodeDraft).then(() => setJoinCodeDraft(""))}
+                  onClick={() =>
+                    void groupsApi.join(joinCodeDraft).then((joined) => {
+                      setJoinCodeDraft("");
+                      if (joined) game.logHistoryEvent({ category: "social", label: `Joined group "${joined.name}"` });
+                    })
+                  }
                 >
                   Join
                 </button>
@@ -1054,7 +1233,9 @@ export function SideDock({
                       style={{ ...chipStyle, padding: "2px 8px", fontSize: 10, background: "rgba(248,113,113,0.25)" }}
                       onClick={() => {
                         if (activeRoomGroupId === g.id) onLeaveRoom();
-                        void groupsApi.leave(g.id);
+                        void groupsApi.leave(g.id).then((ok) => {
+                          if (ok) game.logHistoryEvent({ category: "social", label: `Left group "${g.name}"` });
+                        });
                       }}
                     >
                       leave
@@ -1071,10 +1252,211 @@ export function SideDock({
               yours), with chat, emotes, petting and ⚔️ battles.
             </div>
           </div>
+        ) : view === "friends" ? (
+          <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
+            <section style={{ marginBottom: 16 }}>
+              <h2 style={sectionTitle}>Find players</h2>
+              <input
+                value={friendQuery}
+                onChange={(e) => setFriendQuery(e.target.value)}
+                maxLength={40}
+                placeholder="Search player name…"
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: 7,
+                  padding: "6px 8px",
+                  fontSize: 12,
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  outline: "none",
+                }}
+              />
+              {friendQuery.trim().length >= 2 && (
+                <div style={{ marginTop: 6 }}>
+                  {friendResults.length === 0 ? (
+                    <div style={{ fontSize: 11, opacity: 0.55 }}>No players found.</div>
+                  ) : (
+                    friendResults.map((r) => (
+                      <div
+                        key={r.userId}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "5px 8px",
+                          borderRadius: 7,
+                          background: "rgba(255,255,255,0.05)",
+                          marginBottom: 4,
+                          fontSize: 12,
+                        }}
+                      >
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {r.name}
+                        </span>
+                        {r.relation === "friend" ? (
+                          <span style={{ fontSize: 10, opacity: 0.6 }}>already friends</span>
+                        ) : r.relation === "pending" ? (
+                          <span style={{ fontSize: 10, opacity: 0.6 }}>request pending</span>
+                        ) : (
+                          <button
+                            style={{ ...chipStyle, padding: "4px 8px", fontSize: 11 }}
+                            onClick={() => {
+                              void friendsApi.request(r.userId);
+                              setFriendQuery("");
+                            }}
+                          >
+                            ➕ Add
+                          </button>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </section>
+
+            {friendsApi.error && (
+              <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>⚠️ {friendsApi.error}</div>
+            )}
+
+            {friendsApi.incoming.length > 0 && (
+              <section style={{ marginBottom: 16 }}>
+                <h2 style={sectionTitle}>Friend requests</h2>
+                {friendsApi.incoming.map((f) => (
+                  <div
+                    key={f.userId}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 8px",
+                      borderRadius: 7,
+                      background: "rgba(52,211,153,0.1)",
+                      marginBottom: 4,
+                      fontSize: 12,
+                    }}
+                  >
+                    <span style={{ flex: 1 }}>{f.name}</span>
+                    <button
+                      style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(52,211,153,0.3)" }}
+                      onClick={() => void friendsApi.accept(f.userId)}
+                    >
+                      ✓ Accept
+                    </button>
+                    <button
+                      style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(248,113,113,0.25)" }}
+                      onClick={() => void friendsApi.decline(f.userId)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </section>
+            )}
+
+            <section style={{ marginBottom: 10 }}>
+              <h2 style={sectionTitle}>My friends</h2>
+              {friendsApi.loading && friendsApi.friends.length === 0 && (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>Loading…</div>
+              )}
+              {!friendsApi.loading && friendsApi.friends.length === 0 && (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>No friends yet — search a player above.</div>
+              )}
+              {friendsApi.friends.map((f) => (
+                <div
+                  key={f.userId}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "6px 8px",
+                    borderRadius: 7,
+                    background: "rgba(255,255,255,0.05)",
+                    marginBottom: 4,
+                    fontSize: 12,
+                  }}
+                >
+                  <span>🤝</span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                  <button
+                    title={`Remove ${f.name} from friends`}
+                    style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(248,113,113,0.2)" }}
+                    onClick={() => void friendsApi.remove(f.userId)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              {friendsApi.outgoing.length > 0 && (
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 6 }}>
+                  Waiting on: {friendsApi.outgoing.map((f) => f.name).join(", ")}
+                </div>
+              )}
+            </section>
+          </div>
+        ) : view === "history" ? (
+          <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
+            <section style={{ marginBottom: 8 }}>
+              <h2 style={sectionTitle}>History</h2>
+              {(save.history ?? []).length === 0 ? (
+                <div style={{ fontSize: 12, opacity: 0.6 }}>No history yet — go feed your pet!</div>
+              ) : (
+                (save.history ?? []).map((h) => (
+                  <div
+                    key={h.id}
+                    style={{
+                      borderRadius: 10,
+                      background: "rgba(255,255,255,0.05)",
+                      padding: "8px 10px",
+                      marginBottom: 8,
+                    }}
+                  >
+                    {/* Description gets the full row width as a single
+                        non-wrapping line; the timestamp sits on its own row. */}
+                    <div
+                      title={h.label}
+                      style={{
+                        fontSize: 12,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {HISTORY_CATEGORY_ICON[h.category]} {h.label}
+                    </div>
+                    <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{new Date(h.at).toLocaleString()}</div>
+                  </div>
+                ))
+              )}
+            </section>
+          </div>
         ) : view === "ranks" ? (
           <div className="mpc-no-scrollbar" style={{ flex: 1, overflowY: "auto", padding: "0 18px 18px" }}>
             <section style={{ marginBottom: 16 }}>
-              <h2 style={sectionTitle}>Leaderboard — top care points</h2>
+              <h2 style={sectionTitle}>Leaderboard</h2>
+              {/* Metric filter pills (ported from the old hub's leaderboard) */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+                {LEADERBOARD_METRICS.map((m) => (
+                  <button
+                    key={m.metric}
+                    onClick={() => setRankMetric(m.metric)}
+                    style={{
+                      cursor: "pointer",
+                      border: "none",
+                      borderRadius: 999,
+                      padding: "4px 10px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: "#fff",
+                      background: rankMetric === m.metric ? "rgba(52,211,153,0.35)" : "rgba(255,255,255,0.08)",
+                    }}
+                  >
+                    {m.icon} {m.label}
+                  </button>
+                ))}
+              </div>
               {leaderboard.error && (
                 <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>⚠️ {leaderboard.error}</div>
               )}
@@ -1102,7 +1484,13 @@ export function SideDock({
                     <span style={{ opacity: 0.5 }}> · {entry.petName}</span>
                   </span>
                   <span title={STAGE_NAMES[entry.evolutionStage] ?? ""}>{STAGE_EMOJI[entry.evolutionStage] ?? "❔"}</span>
-                  <span style={{ color: "#fbbf24", fontWeight: 700 }}>{Math.floor(entry.carePoints)} ⭐</span>
+                  <span style={{ color: "#fbbf24", fontWeight: 700 }}>
+                    {rankMetric === "evolutionStage"
+                      ? `Stage ${entry.evolutionStage}/3 ✨`
+                      : rankMetric === "interactions"
+                        ? `${entry.interactions} 🤝`
+                        : `${Math.floor(entry.carePoints)} ⭐`}
+                  </span>
                 </div>
               ))}
               {!leaderboard.loading && leaderboard.entries.length === 0 && !leaderboard.error && (
@@ -1178,7 +1566,31 @@ export function SideDock({
             <section style={{ marginBottom: 16 }}>
               <h2 style={sectionTitle}>Kitchen &amp; toy box</h2>
               <div style={{ display: "flex", gap: 8 }}>
+                {/* Egg phase: no feeding or ball — the warm lamp replaces them.
+                    Click it and the cursor becomes a light source to hold over
+                    the egg (GameView's warm mode). */}
+                {game.isEgg && (
+                  <div style={{ ...itemBoxStyle, opacity: canWarm ? 1 : 0.45 }}>
+                    <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <span
+                        onClick={canWarm ? onStartWarm : undefined}
+                        title={canWarm ? "Take the lamp and warm your egg" : "Not available right now"}
+                        style={{
+                          fontSize: 28,
+                          lineHeight: 1,
+                          userSelect: "none",
+                          cursor: canWarm ? "pointer" : "default",
+                          filter: canWarm ? "drop-shadow(0 0 6px rgba(253,224,71,0.8))" : "grayscale(0.6)",
+                        }}
+                      >
+                        💡
+                      </span>
+                    </div>
+                    <span style={{ fontSize: 11, opacity: 0.7 }}>Warm the egg</span>
+                  </div>
+                )}
                 {/* Food pile — grab a piece straight off the pile and throw it. */}
+                {!game.isEgg && (
                 <div style={{ ...itemBoxStyle, opacity: canFeed ? 1 : 0.45 }}>
                   <div style={{ position: "relative", height: 42, marginBottom: 4 }}>
                     {FOOD_PILE_LAYOUT.map((p, i) => (
@@ -1232,8 +1644,10 @@ export function SideDock({
                     {nextFoodEta > 0 ? `next 🍖 in ${fmtEta(nextFoodEta)}` : "Drag to throw"}
                   </span>
                 </div>
+                )}
 
                 {/* The ball — grab it and throw; comes back when the pet's done. */}
+                {!game.isEgg && (
                 <div style={{ ...itemBoxStyle, opacity: canPlayBall ? 1 : 0.45 }}>
                   <div style={{ height: 42, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span
@@ -1267,6 +1681,7 @@ export function SideDock({
                   </div>
                   <span style={{ fontSize: 11, opacity: 0.7 }}>{ballReady ? "Drag to throw" : "Out playing…"}</span>
                 </div>
+                )}
 
                 {/* The sponge — click to enter scrub mode. */}
                 <div style={{ ...itemBoxStyle, opacity: canClean ? 1 : 0.45 }}>

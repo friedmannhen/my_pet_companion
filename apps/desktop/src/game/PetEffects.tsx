@@ -205,32 +205,36 @@ export function PetEffects({
         <div
           style={{
             position: "absolute",
-            // Spans from clearly above the pet's head down to about its feet
-            // (top -30 .. -30+170=140, vs. the pet's own 0..128 box) — drops
-            // fall the pet's full height instead of stopping mid-body.
-            top: -30,
-            left: "56%",
-            height: 170,
-            width: 112,
+            // Spans from clearly above the pet's head down to about its feet —
+            // drops fall the sprite's full height instead of stopping mid-body.
+            // Sprites render centered in the cell (egg 0.5x, pets 0.7x), so the
+            // band anchors at 50% and shrinks for the small egg — the old 56%
+            // offset left the scaled-down egg sitting left of the rain.
+            top: isEgg ? -20 : -30,
+            left: "50%",
+            height: isEgg ? 130 : 170,
+            width: isEgg ? 76 : 112,
             transform: "translateX(-50%)",
             overflow: "hidden",
             pointerEvents: "none",
           }}
         >
+          {/* x is a % of the band width so the same pattern fits both the
+              narrow egg band and the full pet band without clipping. */}
           {[
-            { x: 10, delay: 0, duration: 0.72 },
-            { x: 24, delay: 0.2, duration: 0.86 },
-            { x: 39, delay: 0.08, duration: 0.78 },
-            { x: 55, delay: 0.31, duration: 0.9 },
-            { x: 72, delay: 0.13, duration: 0.8 },
-            { x: 88, delay: 0.42, duration: 0.94 },
+            { x: 9, delay: 0, duration: 0.72 },
+            { x: 21, delay: 0.2, duration: 0.86 },
+            { x: 35, delay: 0.08, duration: 0.78 },
+            { x: 49, delay: 0.31, duration: 0.9 },
+            { x: 64, delay: 0.13, duration: 0.8 },
+            { x: 79, delay: 0.42, duration: 0.94 },
           ].map((drop, i) => (
             <motion.span
               key={`rain-drop-${i}`}
               style={{
                 position: "absolute",
                 top: 0,
-                left: drop.x,
+                left: `${drop.x}%`,
                 display: "block",
                 height: 10,
                 width: 4,
@@ -244,17 +248,17 @@ export function PetEffects({
             />
           ))}
           {[
-            { x: 12, delay: 0.56 },
-            { x: 36, delay: 0.68 },
-            { x: 60, delay: 0.5 },
-            { x: 82, delay: 0.75 },
+            { x: 11, delay: 0.56 },
+            { x: 32, delay: 0.68 },
+            { x: 54, delay: 0.5 },
+            { x: 73, delay: 0.75 },
           ].map((splash, i) => (
             <motion.span
               key={`rain-splash-${i}`}
               style={{
                 position: "absolute",
                 bottom: 18,
-                left: splash.x,
+                left: `${splash.x}%`,
                 display: "block",
                 height: 4,
                 width: 12,

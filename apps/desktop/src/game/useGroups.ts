@@ -32,7 +32,10 @@ export interface UseGroups {
   refresh: () => Promise<void>;
   create: (name: string) => Promise<GroupInfo | null>;
   join: (code: string) => Promise<GroupInfo | null>;
-  leave: (groupId: string) => Promise<void>;
+  /** Resolves true on success — callers gate optimistic UI (history log) on it. */
+  leave: (groupId: string) => Promise<boolean>;
+  /** Resolves true on success — callers gate optimistic UI (history log) on it. */
+  deleteGroup: (groupId: string) => Promise<boolean>;
 }
 
 export function useGroups(userId: string | null): UseGroups {
@@ -109,8 +112,8 @@ export function useGroups(userId: string | null): UseGroups {
   );
 
   const leave = useCallback(
-    async (groupId: string) => {
-      if (!supabase || !userId) return;
+    async (groupId: string): Promise<boolean> => {
+      if (!supabase || !userId) return false;
       setError(null);
       const { error: err } = await supabase
         .from("group_memberships")
@@ -119,9 +122,22 @@ export function useGroups(userId: string | null): UseGroups {
         .eq("group_id", groupId);
       if (err) setError(err.message);
       await refresh();
+      return !err;
     },
     [userId, refresh],
   );
 
-  return { groups, loading, error, refresh, create, join, leave };
+  const deleteGroup = useCallback(
+    async (groupId: string): Promise<boolean> => {
+      if (!supabase || !userId) return false;
+      setError(null);
+      const { error: err } = await supabase.rpc("delete_group", { target_group_id: groupId });
+      if (err) setError(err.message);
+      await refresh();
+      return !err;
+    },
+    [userId, refresh],
+  );
+
+  return { groups, loading, error, refresh, create, join, leave, deleteGroup };
 }

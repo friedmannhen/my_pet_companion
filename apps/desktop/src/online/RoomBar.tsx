@@ -5,9 +5,11 @@
 // while the chat box is expanded — the same bounded-interaction pattern as
 // wash-scrub and the settings inputs.
 import { useEffect, useRef, useState } from "react";
-import { BATTLE_ROUND_MS, BATTLE_VERDICT_MS, type RoomApi } from "./useRoom";
+import { BATTLE_ROUND_MS, BATTLE_VERDICT_MS, type RoomApi, type RpsMove } from "./useRoom";
 
 const EMOTES = ["👋", "❤️", "😂", "😮", "😢", "🎉"];
+
+const RPS_EMOJI: Record<RpsMove, string> = { rock: "✊", paper: "✋", scissors: "✌️" };
 
 const barBtn: React.CSSProperties = {
   cursor: "pointer",
@@ -22,6 +24,8 @@ const barBtn: React.CSSProperties = {
 export function RoomBar({ room }: { room: RoomApi }) {
   const [chatOpen, setChatOpen] = useState(false);
   const [draft, setDraft] = useState("");
+  const [gamePickerOpen, setGamePickerOpen] = useState(false);
+  const [gameCap, setGameCap] = useState(4);
   const inputRef = useRef<HTMLInputElement>(null);
   // Rerender tick while a battle reveal is playing.
   const [, setTick] = useState(0);
@@ -127,6 +131,267 @@ export function RoomBar({ room }: { room: RoomApi }) {
         </div>
       )}
 
+      {/* Minigame: RPS invite banner */}
+      {room.incomingGameInvite && !room.minigame && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            borderRadius: 12,
+            background: "rgba(30,58,95,0.95)",
+            color: "#fff",
+            fontSize: 13,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+          }}
+        >
+          🎮 {room.incomingGameInvite.fromName} wants to play Rock-Paper-Scissors!
+          <button
+            style={{ ...barBtn, background: "rgba(52,211,153,0.85)", color: "#06281c", fontWeight: 700 }}
+            onClick={room.acceptGameInvite}
+          >
+            Play
+          </button>
+          <button style={barBtn} onClick={room.declineGameInvite}>
+            Not now
+          </button>
+        </div>
+      )}
+      {room.outgoingGameInviteTo && !room.minigame && (
+        <div style={{ padding: "6px 12px", borderRadius: 10, background: "rgba(20,20,26,0.85)", color: "#93c5fd", fontSize: 12 }}>
+          🎮 Game invite sent — waiting…
+        </div>
+      )}
+
+      {/* Minigame: move picker / waiting / result */}
+      {room.minigame && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 14px",
+            borderRadius: 12,
+            background: "rgba(23,37,84,0.95)",
+            color: "#fff",
+            fontSize: 13,
+            fontWeight: 700,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+          }}
+        >
+          {room.minigame.outcome ? (
+            <>
+              <span>
+                {RPS_EMOJI[room.minigame.myMove!]} vs {RPS_EMOJI[room.minigame.theirMove!]} —{" "}
+                {room.minigame.outcome === "win"
+                  ? `🏆 you beat ${room.minigame.opponentName}!`
+                  : room.minigame.outcome === "tie"
+                    ? "🤝 it's a tie!"
+                    : `💔 ${room.minigame.opponentName} wins!`}
+              </span>
+              <button style={barBtn} onClick={room.clearMinigame}>
+                ✕
+              </button>
+            </>
+          ) : room.minigame.myMove ? (
+            <>
+              <span>
+                {RPS_EMOJI[room.minigame.myMove]} locked in — waiting for {room.minigame.opponentName}…
+              </span>
+              {/* Escape hatch: the opponent may have left mid-game. */}
+              <button title="Abandon game" style={barBtn} onClick={room.clearMinigame}>
+                ✕
+              </button>
+            </>
+          ) : (
+            <>
+              <span>vs {room.minigame.opponentName} — pick:</span>
+              {(["rock", "paper", "scissors"] as const).map((m) => (
+                <button
+                  key={m}
+                  title={m}
+                  style={{ ...barBtn, fontSize: 18, padding: "4px 10px" }}
+                  onClick={() => room.sendRpsMove(m)}
+                >
+                  {RPS_EMOJI[m]}
+                </button>
+              ))}
+              <button title="Abandon game" style={barBtn} onClick={room.clearMinigame}>
+                ✕
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Lobby feedback toast (turned away / host left) */}
+      {room.lobbyNotice && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            borderRadius: 10,
+            background: "rgba(120,53,15,0.95)",
+            color: "#fde68a",
+            fontSize: 12,
+            fontWeight: 700,
+          }}
+        >
+          {room.lobbyNotice}
+          <button style={barBtn} onClick={room.clearLobbyNotice}>
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Room-wide minigame lobby invite */}
+      {room.lobbyInvite && !room.minigameLobby && !room.tossGame && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            borderRadius: 12,
+            background: "rgba(6,78,59,0.95)",
+            color: "#fff",
+            fontSize: 13,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+          }}
+        >
+          🎯 {room.lobbyInvite.hostName} is starting Target Toss (up to {room.lobbyInvite.cap} players)!
+          <button
+            style={{ ...barBtn, background: "rgba(52,211,153,0.85)", color: "#06281c", fontWeight: 700 }}
+            onClick={room.acceptLobbyInvite}
+          >
+            Join
+          </button>
+          <button style={barBtn} onClick={room.declineLobbyInvite}>
+            Not now
+          </button>
+        </div>
+      )}
+
+      {/* Lobby roster / ready / start panel */}
+      {room.minigameLobby && !room.tossGame && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            padding: "10px 14px",
+            borderRadius: 12,
+            background: "rgba(20,20,26,0.95)",
+            color: "#fff",
+            fontSize: 12,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+            minWidth: 240,
+          }}
+        >
+          <div style={{ fontWeight: 800 }}>
+            🎯 Target Toss lobby — {room.minigameLobby.accepted.length}/{room.minigameLobby.cap} players
+          </div>
+          {room.minigameLobby.accepted.map((a) => (
+            <div key={a.userId} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <span>
+                {a.name}
+                {a.userId === room.minigameLobby!.hostId && " 👑"}
+              </span>
+              <span style={{ opacity: 0.85 }}>{room.minigameLobby!.ready.includes(a.userId) ? "✅ ready" : "…"}</span>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+            {room.minigameLobby.hostId === room.selfId ? (
+              <>
+                <button
+                  disabled={
+                    room.minigameLobby.accepted.length < 2 ||
+                    !room.minigameLobby.accepted.every((a) => room.minigameLobby!.ready.includes(a.userId))
+                  }
+                  style={{
+                    ...barBtn,
+                    background: "rgba(52,211,153,0.85)",
+                    color: "#06281c",
+                    fontWeight: 700,
+                    opacity:
+                      room.minigameLobby.accepted.length >= 2 &&
+                        room.minigameLobby.accepted.every((a) => room.minigameLobby!.ready.includes(a.userId))
+                        ? 1
+                        : 0.45,
+                  }}
+                  onClick={room.startTossGame}
+                >
+                  ▶ Start
+                </button>
+                <button style={{ ...barBtn, background: "rgba(248,113,113,0.3)" }} onClick={room.cancelMinigameLobby}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                style={{
+                  ...barBtn,
+                  background: room.minigameLobby.ready.includes(room.selfId ?? "")
+                    ? "rgba(52,211,153,0.5)"
+                    : (barBtn.background as string),
+                  fontWeight: 700,
+                }}
+                onClick={room.toggleTossReady}
+              >
+                {room.minigameLobby.ready.includes(room.selfId ?? "") ? "✅ Ready" : "Ready up"}
+              </button>
+            )}
+            <span style={{ fontSize: 10, opacity: 0.55, alignSelf: "center" }}>
+              {room.minigameLobby.hostId === room.selfId ? "Starts when everyone is ready" : "Waiting for the host…"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Game picker (host-side entry point) */}
+      {gamePickerOpen && !room.minigameLobby && !room.tossGame && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            borderRadius: 12,
+            background: "rgba(20,20,26,0.95)",
+            color: "#fff",
+            fontSize: 12,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+          }}
+        >
+          <span style={{ fontWeight: 700 }}>🎯 Target Toss</span>
+          <span style={{ opacity: 0.7 }}>max players:</span>
+          {[2, 3, 4].map((n) => (
+            <button
+              key={n}
+              style={{ ...barBtn, background: gameCap === n ? "rgba(52,211,153,0.5)" : barBtn.background as string }}
+              onClick={() => setGameCap(n)}
+            >
+              {n}
+            </button>
+          ))}
+          <button
+            style={{ ...barBtn, background: "rgba(52,211,153,0.85)", color: "#06281c", fontWeight: 700 }}
+            onClick={() => {
+              room.createMinigameLobby(gameCap);
+              setGamePickerOpen(false);
+            }}
+          >
+            Invite room
+          </button>
+          <button style={barBtn} onClick={() => setGamePickerOpen(false)}>
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Chat input (expanded) */}
       {chatOpen && (
         <div style={{ display: "flex", gap: 6 }}>
@@ -183,6 +448,14 @@ export function RoomBar({ room }: { room: RoomApi }) {
           </button>
         ))}
         <span style={{ width: 1, height: 16, background: "rgba(255,255,255,0.15)" }} />
+        <button
+          style={barBtn}
+          title={room.minigameLobby || room.tossGame ? "A game is already going" : "Mini-games"}
+          disabled={!!room.minigameLobby || !!room.tossGame}
+          onClick={() => setGamePickerOpen((o) => !o)}
+        >
+          🎯
+        </button>
         <button style={barBtn} title="Chat" onClick={() => setChatOpen((o) => !o)}>
           💬
         </button>

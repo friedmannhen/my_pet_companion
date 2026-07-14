@@ -6,6 +6,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PET_RULES,
+  PET_QUEST_DEFINITIONS,
+  appendHistoryEntry,
   applyCarePointPenalty,
   canEvolveStage,
   claimQuestReward,
@@ -25,9 +27,11 @@ import {
   recordThrowBallQuestProgress,
   replayOfflineGap,
   type EvolutionStage,
+  type HistoryEntry,
   type PetQuestCode,
   type PetQuestState,
   type PetSaveData,
+  type PetType,
 } from "@pet/core";
 import { supabase } from "../supabase/client";
 import { rowToSave, saveToRow, type PetRow } from "../supabase/petRow";
@@ -35,6 +39,15 @@ import { useAchievements, type UseAchievements } from "./useAchievements";
 
 const rules = DEFAULT_PET_RULES;
 const SAVE_KEY = "mpc_pet_save_cat";
+// Tracks which account the cached local save actually belongs to (or "guest"
+// before any sign-in). SAVE_KEY itself is one global slot, not per-user — so
+// without this marker, signing out of one account and signing up a brand new
+// one on the same machine would silently seed the new account's first cloud
+// row with the previous account's stats (a real bug: a fresh signup once
+// inherited 460+ care points this way). We only trust the cached save as a
+// seed for a brand-new cloud row when its owner marker matches the
+// currently-authenticating userId.
+const SAVE_OWNER_KEY = "mpc_pet_save_owner";
 const TICK_MS = 60_000;
 // Quest day/week boundaries anchor to the PLAYER'S OWN local timezone (not
 // the hardcoded Israel-business-hours default in pet-core, which is a
@@ -107,6 +120,8 @@ export interface PetGame {
   restart: () => void;
   /** Rename the pet (trimmed, 1–24 chars — no-op otherwise). */
   rename: (name: string) => void;
+  /** First-launch starter-egg pick — sets petType and clears the picker gate. */
+  chooseEgg: (petType: PetType) => void;
   /** A friend petted this pet in an online room: small happiness bump, no care points (not farmable). */
   receiveSocialPet: () => void;
   /** Call when a warm-hold ends — isEggOverheating otherwise only updates
@@ -115,9 +130,13 @@ export interface PetGame {
   clearOverheatWarning: () => void;
   /** Applies an online battle outcome: winner gains happiness + care points, loser sheds a little happiness. */
   applyBattleResult: (won: boolean) => void;
+  /** Small happiness/care-point stakes for social minigames (RPS etc.). */
+  applyMinigameResult: (outcome: "win" | "lose" | "tie", gameName: string) => void;
   /** Claim a claimable daily/weekly quest — awards its care-point reward. */
   claimQuest: (code: PetQuestCode) => void;
   claimableQuestCount: number;
+  /** Escape hatch for history entries originating outside this hook (e.g. group join/leave, achievement claims). */
+  logHistoryEvent: (entry: Omit<HistoryEntry, "id" | "at">) => void;
   achievements: UseAchievements;
   // Dev-only helpers — only reachable from the DEV-gated admin panel.
   debugApply: (patch: Partial<PetSaveData>) => void;
@@ -167,6 +186,15 @@ export function usePetGame(userId: string | null): PetGame {
     let cancelled = false;
     setSyncStatus("loading");
     (async () => {
+      // The cached local save (and its history log) only belongs to this
+      // account if it was left behind by THIS account — see SAVE_OWNER_KEY.
+      // Otherwise it's another account's leftovers on a shared machine.
+      let localIsMine = false;
+      try {
+        localIsMine = localStorage.getItem(SAVE_OWNER_KEY) === userId;
+      } catch {
+        /* ignore */
+      }
       const { data, error } = await supabase
         .from("pets")
         .select("*")
@@ -183,7 +211,14 @@ export function usePetGame(userId: string | null): PetGame {
       if (data) {
         const row = data as PetRow & { id: string };
         petIdRef.current = row.id;
-        let loaded = applyDecay(rowToSave(row));
+        // History is local-only (never synced to the pets row) — carry the
+        // locally-cached log over (when it's actually this account's), or
+        // the cloud-authoritative load would silently wipe it on every
+        // sign-in.
+        let loaded = {
+          ...applyDecay(rowToSave(row)),
+          history: localIsMine ? (saveRef.current.history ?? []) : [],
+        };
         // Quest progress rides in its own row (pets table stays scalar).
         const { data: qp } = await supabase
           .from("pet_quest_progress")
@@ -208,7 +243,12 @@ export function usePetGame(userId: string | null): PetGame {
         }
         setSave(normalizeQuestPeriods(loaded, new Date(), calendar));
       } else {
-        const seeded = saveRef.current;
+        // No cloud row yet: the cached local save is only a trustworthy seed
+        // when it's this account's own — otherwise start genuinely fresh
+        // rather than inheriting a previous sign-in's pet (this was the
+        // "new signup starts with 460 care points" bug).
+        const seeded = localIsMine ? saveRef.current : freshPetSave({ petType: "cat" }, undefined, calendar);
+        if (!localIsMine) setSave(seeded);
         const { data: inserted, error: insErr } = await supabase
           .from("pets")
           .insert(saveToRow(seeded, userId))
@@ -222,6 +262,11 @@ export function usePetGame(userId: string | null): PetGame {
           return;
         }
         petIdRef.current = (inserted as { id: string }).id;
+      }
+      try {
+        localStorage.setItem(SAVE_OWNER_KEY, userId);
+      } catch {
+        /* quota */
       }
       setSyncError(null);
       setSyncStatus("synced");
@@ -284,6 +329,19 @@ export function usePetGame(userId: string | null): PetGame {
 
   const isEgg = save.evolutionStage === 0;
 
+  // History labels show at most 2 decimals (raw floats like 60.333333 are
+  // stored in before/after for data purposes, never shown).
+  const fmt2 = (n: number): string => {
+    const r = Math.round(n * 100) / 100;
+    return Number.isInteger(r) ? String(r) : r.toFixed(2);
+  };
+  /** " , +2.5 ⭐" suffix when an action also moved care points. */
+  const cpSuffix = (before: number, after: number): string => {
+    const d = Math.round((after - before) * 100) / 100;
+    if (d === 0) return "";
+    return `, ${d > 0 ? "+" : ""}${fmt2(d)} care points`;
+  };
+
   /**
    * Shared care-action wrapper: wakes the pet (any care action counts as
    * interaction), raises one stat, earns proportional care points (with the
@@ -296,6 +354,7 @@ export function usePetGame(userId: string | null): PetGame {
       increase: number,
       basePoints: number,
       bonusCategory: "feed" | "wash" | "play",
+      label: string,
       counter?: "feedCount" | "washCount" | "petCount" | "throwBallCount",
       recordQuests?: (next: PetSaveData, now: Date, statBefore: number) => PetSaveData,
     ) => {
@@ -320,7 +379,14 @@ export function usePetGame(userId: string | null): PetGame {
         };
         if (counter) next[counter] = (prev[counter] ?? 0) + 1;
         if (recordQuests) next = recordQuests(next, now, before);
-        return next;
+        return appendHistoryEntry(next, {
+          category: "care",
+          label: `${label} — ${stat} ${fmt2(before)} → ${fmt2(next[stat])}${cpSuffix(prev.carePoints, next.carePoints)}`,
+          statKey: stat,
+          before,
+          after: next[stat],
+          delta: next[stat] - before,
+        });
       });
     },
     [],
@@ -423,12 +489,20 @@ export function usePetGame(userId: string | null): PetGame {
           overfeedCount: (prev.overfeedCount ?? 0) + 1,
         };
         next = recordCareActionQuestProgress(next, "feed", rules, now, calendar, false);
-        return markOverfeedQuestFailure(next, now, calendar);
+        next = markOverfeedQuestFailure(next, now, calendar);
+        return appendHistoryEntry(next, {
+          category: "penalty",
+          label: `Overfed — happiness ${fmt2(next.happiness - prev.happiness)}${cpSuffix(prev.carePoints, next.carePoints)}`,
+          statKey: "happiness",
+          before: prev.happiness,
+          after: next.happiness,
+          delta: next.happiness - prev.happiness,
+        });
       }
       const before = prev.hunger;
       const earned = proportionalPoints(5 * multRef.current.feed, before, 40);
       const nextPoints = clampCarePointsForProgress(prev, prev.carePoints + earned, rules);
-      const next: PetSaveData = {
+      let next: PetSaveData = {
         ...prev,
         hunger: clampStat(before + 40),
         carePoints: nextPoints,
@@ -439,34 +513,58 @@ export function usePetGame(userId: string | null): PetGame {
         lastFed: nowIso,
         feedCount: prev.feedCount + 1,
       };
-      return recordCareActionQuestProgress(next, "feed", rules, now, calendar, before < 100);
+      next = recordCareActionQuestProgress(next, "feed", rules, now, calendar, before < 100);
+      return appendHistoryEntry(next, {
+        category: "care",
+        label: `Fed — hunger ${fmt2(before)} → ${fmt2(next.hunger)}${cpSuffix(prev.carePoints, next.carePoints)}`,
+        statKey: "hunger",
+        before,
+        after: next.hunger,
+        delta: next.hunger - before,
+      });
     });
   }, []);
 
   const wash = useCallback(
     () =>
-      careAction("cleanliness", 60, 5, "wash", "washCount", (next, now, before) =>
+      careAction("cleanliness", 60, 5, "wash", "Washed", "washCount", (next, now, before) =>
         recordCareActionQuestProgress(next, "wash", rules, now, calendar, before < 100),
       ),
     [careAction],
   );
   const pet = useCallback(
     () =>
-      careAction("happiness", 20, 5, "play", "petCount", (next, now, before) =>
+      careAction("happiness", 20, 5, "play", "Petted", "petCount", (next, now, before) =>
         recordCareActionQuestProgress(next, "pet", rules, now, calendar, before < 100),
       ),
     [careAction],
   );
   const throwBall = useCallback(
     () =>
-      careAction("happiness", 15, 4, "play", "throwBallCount", (next, now) =>
+      careAction("happiness", 15, 4, "play", "Played fetch", "throwBallCount", (next, now) =>
         recordThrowBallQuestProgress(next, now, calendar),
       ),
     [careAction],
   );
 
   const claimQuest = useCallback((code: PetQuestCode) => {
-    setSave((prev) => claimQuestReward(prev, code, rules, new Date(), calendar));
+    setSave((prev) => {
+      const next = claimQuestReward(prev, code, rules, new Date(), calendar);
+      const awarded = next.carePoints - prev.carePoints;
+      if (awarded <= 0) return next; // not actually claimable — no-op, don't log
+      return appendHistoryEntry(next, {
+        category: "quest",
+        label: `Quest claimed: ${PET_QUEST_DEFINITIONS[code].title} — +${fmt2(awarded)} care points`,
+        statKey: "carePoints",
+        before: prev.carePoints,
+        after: next.carePoints,
+        delta: awarded,
+      });
+    });
+  }, []);
+
+  const logHistoryEvent = useCallback((entry: Omit<HistoryEntry, "id" | "at">) => {
+    setSave((prev) => appendHistoryEntry(prev, entry));
   }, []);
 
   const clearOverheatWarning = useCallback(() => {
@@ -484,7 +582,7 @@ export function usePetGame(userId: string | null): PetGame {
       if (!canEvolveStage(prev.carePoints, prev.evolutionStage, rules)) return prev;
       const nextStage = (prev.evolutionStage + 1) as EvolutionStage;
       const threshold = rules.evolutionThresholds[nextStage];
-      return {
+      const next: PetSaveData = {
         ...prev,
         evolutionStage: nextStage,
         hatched: true,
@@ -492,6 +590,14 @@ export function usePetGame(userId: string | null): PetGame {
         carePointsFloor: threshold,
         lastInteraction: new Date().toISOString(),
       };
+      return appendHistoryEntry(next, {
+        category: "evolution",
+        label: prev.evolutionStage === 0 ? "Hatched!" : `Evolved: stage ${prev.evolutionStage} → ${nextStage}`,
+        statKey: "evolutionStage",
+        before: prev.evolutionStage,
+        after: nextStage,
+        delta: nextStage - prev.evolutionStage,
+      });
     });
   }, []);
 
@@ -522,7 +628,8 @@ export function usePetGame(userId: string | null): PetGame {
 
   const toggleSleep = useCallback(() => {
     setSave((prev) => {
-      if (!prev.isAlive) return prev;
+      // Eggs don't sleep — they go dormant on their own (see replayOfflineGap).
+      if (!prev.isAlive || prev.evolutionStage === 0) return prev;
       const nowIso = new Date().toISOString();
       if (prev.isSleeping) {
         return {
@@ -551,6 +658,13 @@ export function usePetGame(userId: string | null): PetGame {
     setSave(freshPetSave({ petType: "cat" }, undefined, calendar));
   }, []);
 
+  const chooseEgg = useCallback((petType: PetType) => {
+    setSave((prev) => appendHistoryEntry({ ...prev, petType, eggChosen: true }, {
+      category: "evolution",
+      label: `Picked starter egg: ${petType}`,
+    }));
+  }, []);
+
   const rename = useCallback((name: string) => {
     const trimmed = name.trim();
     if (!trimmed || trimmed.length > 24) return;
@@ -564,19 +678,50 @@ export function usePetGame(userId: string | null): PetGame {
     });
   }, []);
 
+  // Minigames grant NO progression rewards (product decision, Jul 2026) —
+  // results are only logged locally and persisted to minigame_scores (via
+  // record_minigame_result, called by the room layer) for future
+  // achievements/leaderboards.
+  const applyMinigameResult = useCallback((outcome: "win" | "lose" | "tie", gameName: string) => {
+    setSave((prev) => {
+      if (!prev.isAlive) return prev;
+      const next: PetSaveData = { ...prev, lastInteraction: new Date().toISOString() };
+      return appendHistoryEntry(next, {
+        category: "social",
+        label: `${gameName} — ${outcome === "win" ? "won 🏆" : outcome === "tie" ? "tie 🤝" : "lost"}`,
+      });
+    });
+  }, []);
+
   const applyBattleResult = useCallback((won: boolean) => {
     setSave((prev) => {
       if (!prev.isAlive) return prev;
       const nowIso = new Date().toISOString();
       if (won) {
-        return {
+        const next: PetSaveData = {
           ...prev,
           happiness: clampStat(prev.happiness + 10),
           carePoints: clampCarePointsForProgress(prev, prev.carePoints + 6, rules),
           lastInteraction: nowIso,
         };
+        return appendHistoryEntry(next, {
+          category: "social",
+          label: `Battle won — happiness +${fmt2(next.happiness - prev.happiness)}${cpSuffix(prev.carePoints, next.carePoints)}`,
+          statKey: "happiness",
+          before: prev.happiness,
+          after: next.happiness,
+          delta: next.happiness - prev.happiness,
+        });
       }
-      return { ...prev, happiness: clampStat(prev.happiness - 3), lastInteraction: nowIso };
+      const next: PetSaveData = { ...prev, happiness: clampStat(prev.happiness - 3), lastInteraction: nowIso };
+      return appendHistoryEntry(next, {
+        category: "social",
+        label: `Battle lost — happiness ${fmt2(next.happiness - prev.happiness)}`,
+        statKey: "happiness",
+        before: prev.happiness,
+        after: next.happiness,
+        delta: next.happiness - prev.happiness,
+      });
     });
   }, []);
 
@@ -585,7 +730,10 @@ export function usePetGame(userId: string | null): PetGame {
     setSave((prev) => ({ ...prev, ...patch, lastInteraction: new Date().toISOString() }));
   }, []);
 
-  const debugLoadPreset = useCallback((preset: PetSaveData) => setSave(preset), []);
+  // Presets mean "give me this exact state NOW" — never re-route through the
+  // first-launch egg picker (AdminPanel builds them from freshPetSave, whose
+  // eggChosen: false would otherwise trap the dev behind the picker).
+  const debugLoadPreset = useCallback((preset: PetSaveData) => setSave({ ...preset, eggChosen: true }), []);
 
   /**
    * Simulates "the app was closed for N hours": shifts all clocks back
@@ -696,11 +844,14 @@ export function usePetGame(userId: string | null): PetGame {
     toggleSleep,
     restart,
     rename,
+    chooseEgg,
     receiveSocialPet,
     applyBattleResult,
+    applyMinigameResult,
     clearOverheatWarning,
     claimQuest,
     claimableQuestCount: countClaimableQuests(save),
+    logHistoryEvent,
     achievements,
     debugApply,
     debugLoadPreset,

@@ -103,6 +103,21 @@ auto-joins it via the signup trigger (see below), never created client-side.
   trap (a `group_memberships` policy that queries `group_memberships`
   inside itself).
 
+- **`delete_group(target_group_id uuid) → void`** (migration
+  `20260712000000`) — `SECURITY DEFINER`. Owner-only, never the Global
+  group; a plain hard delete (memberships + group-scoped hall_of_fame rows
+  cascade). Called from `useGroups.ts`'s `deleteGroup` (returns boolean
+  success to the UI so history logging can be gated on it).
+- **`record_minigame_result(p_game_code text, p_distance numeric, p_won
+  boolean) → void`** (migration `20260713010000`) — `SECURITY INVOKER`
+  (only touches the caller's own row). Atomic upsert into
+  `minigame_scores` (PK `(user_id, game_code)`: `best_score = least(...)`,
+  `games_played + 1`, conditional `games_won`). Game codes so far: `'rps'`
+  (p_distance null), `'target_toss'` (p_distance = best throw distance,
+  lower = better). Each participant's OWN client calls it once on game
+  over. **Minigames grant no progression rewards** — this table exists for
+  future achievements/leaderboards only.
+
 Both `create_group`/`join_group` are `grant execute ... to authenticated`.
 If you add a new client-callable RPC that needs to bypass an intentionally
 restrictive table policy (like `group_memberships`'s missing insert
@@ -110,6 +125,17 @@ policy), follow this exact shape: `SECURITY DEFINER`, `set search_path =
 public`, validate inputs explicitly (don't trust the RPC's own privilege
 escalation to substitute for input validation), grant execute to
 `authenticated`.
+
+Schema additions (Jul 2026): `pets.egg_chosen boolean default true`
+(migration `20260712010000` — false only for genuinely fresh saves, gates
+the first-launch egg picker); `minigame_scores` table (see RPC above, RLS:
+owner-or-shared-group read, owner insert/update). Migration `20260713000000`
+(hardening, from `supabase db advisors`): revoked `anon` EXECUTE on all the
+SECURITY DEFINER group RPCs + helpers and pinned `touch_updated_at`'s
+search_path. Deferred advisor items (perf-at-scale lint only):
+`auth_rls_initplan` and `multiple_permissive_policies`. The Supabase CLI is
+now linked on this machine — `npx supabase migration list --linked` /
+`db query --linked -f file.sql` work; `db push` needs the user's go-ahead.
 
 ## Edge Functions (`supabase/functions/`, Deno) — the session-lease system
 

@@ -22,12 +22,15 @@ import {
   useTransform,
 } from "framer-motion";
 import type { AuthState } from "../supabase/useAuth";
+import { supabase } from "../supabase/client";
 import { usePetGame } from "./usePetGame";
+import { EggSelect } from "./EggSelect";
 import { useSessionLease } from "../session/useSessionLease";
 import { usePetMovement } from "./usePetMovement";
 import { PetEffects, type PetFxTrigger } from "./PetEffects";
 import { AdminPanel } from "./AdminPanel";
 import { RadialMenu, type RadialAction } from "./RadialMenu";
+import { throwArc } from "./throwPhysics";
 import { SideDock } from "./SideDock";
 import { useRibbonPrefs } from "./useRibbonPrefs";
 import { useAppUpdate } from "./useAppUpdate";
@@ -37,6 +40,7 @@ import { useGroups } from "./useGroups";
 import { useRoom } from "../online/useRoom";
 import { RemotePets } from "../online/RemotePets";
 import { RoomBar } from "../online/RoomBar";
+import { TargetToss } from "./minigames/TargetToss";
 import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
@@ -59,10 +63,20 @@ import eggShard1 from "../assets/pets/black_cat/egg/crack1.png";
 import eggShard2 from "../assets/pets/black_cat/egg/crack2.png";
 
 const PET_SIZE = 128;
+// Display scale (product decision, Jul 2026): hatched pets render at 0.7.
+// ROBUST CENTERING MECHANISM: every pet asset is authored on the same square
+// canvas, and the sprite always renders at the full PET_SIZE cell — the
+// visual shrink is a CSS `transform: scale()` on a dedicated wrapper with
+// transform-origin at the cell's center. The layout box (movement math,
+// drag hitbox, popup/panel anchors, PetEffects' inset:0 overlay) never
+// changes size, so the art stays dead-center at ANY scale — no per-scale
+// position guessing. The scale is animated (not stepped) and stays 1 for
+// the whole egg/hatch cutscene, easing to 0.7 only after the pet jumps out
+// of the shell.
+const PET_DISPLAY_SCALE = 0.7;
 // The unhatched egg idles at half the pet's cell size; once the hatch
 // cutscene starts it grows to HATCH_SIZE (1.5x PET_SIZE) and moves to
-// screen-center — see the hatchCenter/hatchCutsceneActive state below. The
-// pet itself always renders at PET_SIZE, even inside the enlarged shell.
+// screen-center — see the hatchCenter/hatchCutsceneActive state below.
 const EGG_IDLE_SIZE = PET_SIZE / 2;
 const HATCH_SIZE = Math.round(PET_SIZE * 1.5);
 // Shared resting line (offset from the hatch stage's center) that both the
@@ -132,47 +146,8 @@ const bannerStyle: React.CSSProperties = {
 const THROW_EASE: [number, number, number, number] = [0.3, 0, 1, 1];
 const PET_COOLDOWN_MS = 5 * 60 * 1000;
 
-/**
- * Ballistic arc flight for a thrown item: constant horizontal velocity +
- * a gravity-shaped parabola for the vertical rise/fall (peaking at
- * `arcHeight` above the straight line between start and end, at the
- * midpoint of the flight), plus continuous spin. The progress driver runs
- * on a plain linear tween — easing lives in the quadratic height formula
- * itself (that's what makes it decelerate/accelerate like a real toss); an
- * eased progress on top of that would double up and distort the arc.
- */
-async function throwArc(opts: {
-  x: ReturnType<typeof useMotionValue<number>>;
-  y: ReturnType<typeof useMotionValue<number>>;
-  rotate: ReturnType<typeof useMotionValue<number>>;
-  scaleX: ReturnType<typeof useMotionValue<number>>;
-  scaleY: ReturnType<typeof useMotionValue<number>>;
-  toX: number;
-  toY: number;
-  arcHeight: number;
-  duration: number;
-  spinDegrees: number;
-}): Promise<void> {
-  const { x, y, rotate, scaleX, scaleY, toX, toY, arcHeight, duration, spinDegrees } = opts;
-  const fromX = x.get();
-  const fromY = y.get();
-  const fromRotate = rotate.get();
-  await animate(0, 1, {
-    duration,
-    ease: "linear",
-    onUpdate: (t) => {
-      x.set(fromX + (toX - fromX) * t);
-      // Parabola: 4*t*(1-t) peaks at 1 when t=0.5, zero at t=0 and t=1 —
-      // exactly an object leaving and returning to the flight line's height.
-      y.set(fromY + (toY - fromY) * t - arcHeight * 4 * t * (1 - t));
-      rotate.set(fromRotate + spinDegrees * t);
-      // A little "toward camera" pop at the apex sells the height.
-      const pop = 1 + 0.22 * 4 * t * (1 - t);
-      scaleX.set(pop);
-      scaleY.set(pop);
-    },
-  });
-}
+// throwArc lives in throwPhysics.ts now (shared with the Target Toss
+// minigame) — same math, pure extraction.
 
 interface DeltaPopup {
   id: number;
@@ -267,6 +242,14 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, []);
   useEffect(() => clearHatchTimers, [clearHatchTimers]);
   const [cleaningMode, setCleaningMode] = useState(false);
+  // Egg warm mode: entered from the SideDock's lamp (replaces feed/ball
+  // while the pet is an egg) — the cursor becomes a glowing light source and
+  // holding it over the egg runs the same warmTick loop the old direct
+  // hold-on-egg gesture used.
+  const [warmingMode, setWarmingMode] = useState(false);
+  const [warmCursor, setWarmCursor] = useState({ x: -200, y: -200 });
+  const [warmHeld, setWarmHeld] = useState(false);
+  const warmHeldRef = useRef(false);
   const [scrubHeld, setScrubHeld] = useState(false);
   const [scrubbingEffectively, setScrubbingEffectively] = useState(false);
   const [scrubProgress, setScrubProgress] = useState(0);
@@ -286,7 +269,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // and not be interrupted: no wander, no drag, no menu-open tap. Any
   // interaction that's more than a single click (feed throw, ball fetch,
   // scrubbing, evolving) sets this.
-  const petBusy = cleaningMode || feedPhase !== "idle" || ballPhase !== "idle" || isEvolving;
+  const petBusy = cleaningMode || warmingMode || feedPhase !== "idle" || ballPhase !== "idle" || isEvolving;
 
   // Freeze wandering while a takeover elsewhere just kicked this device off
   // its lease — a visible behavior change (not just a buried settings
@@ -458,6 +441,90 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     }, 200);
   }, []);
 
+  // ── Egg warm mode (entered from the SideDock lamp) ───────────────────────
+  // Same bounded-modal shape as wash-scrub: whole-screen clickable override,
+  // OS focus for Escape, right-click/Esc/✕ cancels. The light-source cursor
+  // brightens while actually warming (held over the egg).
+  const endWarming = useCallback(() => {
+    stopWarmHold();
+    warmHeldRef.current = false;
+    setWarmHeld(false);
+    setWarmingMode(false);
+    setClickableOverride(false);
+    window.overlay.setFocusable(false);
+  }, [stopWarmHold]);
+
+  const startWarming = useCallback(() => {
+    if (!save.isAlive || !gameRef.current.isEgg) return;
+    setStatsOpen(false);
+    setMenuOpen(false);
+    setWarmingMode(true);
+    setClickableOverride(true);
+    window.overlay.setClickable(true);
+    window.overlay.setFocusable(true);
+  }, [save.isAlive]);
+
+  useEffect(() => {
+    if (!warmingMode) return;
+    // The egg hatched (or died) mid-mode — nothing left to warm.
+    if (!game.isEgg || !save.isAlive) {
+      endWarming();
+      return;
+    }
+
+    const overEgg = (e: MouseEvent) => {
+      const PAD = 20;
+      const petX = movement.x.get();
+      const petY = movement.y.get();
+      return (
+        e.clientX >= petX - PAD &&
+        e.clientX <= petX + PET_SIZE + PAD &&
+        e.clientY >= petY - PAD &&
+        e.clientY <= petY + PET_SIZE + PAD
+      );
+    };
+    // Ref mirror, not the state value — the held/not-held transition must be
+    // read synchronously inside these handlers (see the useConsumables
+    // eager-bailout note: never rely on setState side effects for that).
+    const setHeld = (held: boolean) => {
+      if (held === warmHeldRef.current) return;
+      warmHeldRef.current = held;
+      setWarmHeld(held);
+      if (held) startWarmHold();
+      else stopWarmHold();
+    };
+    const onMove = (e: MouseEvent) => {
+      setWarmCursor({ x: e.clientX, y: e.clientY });
+      // Drifting off the egg while holding pauses the warm ticks, exactly
+      // like the old onPointerLeave on the direct hold gesture.
+      setHeld((e.buttons & 1) === 1 && overEgg(e));
+    };
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0 || !overEgg(e)) return;
+      setHeld(true);
+    };
+    const onUp = () => setHeld(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") endWarming();
+    };
+    const onContext = (e: MouseEvent) => {
+      e.preventDefault();
+      endWarming();
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("contextmenu", onContext);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("contextmenu", onContext);
+    };
+  }, [warmingMode, game.isEgg, save.isAlive, endWarming, startWarmHold, stopWarmHold, movement]);
+
   const pulseHappy = useCallback(() => {
     setFxTrigger("happy");
     setHappyPulse(true);
@@ -490,6 +557,27 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     },
     [game, pulseHappy, sfx, dbg],
   );
+  const onMinigameResolved = useCallback(
+    (outcome: "win" | "lose" | "tie", opponentName: string) => {
+      // No progression rewards for minigames — just the history log + a
+      // lifetime result row (each client records its OWN result; RLS blocks
+      // writing anyone else's).
+      game.applyMinigameResult(outcome, "Rock-Paper-Scissors");
+      if (supabase) {
+        void supabase
+          .rpc("record_minigame_result", { p_game_code: "rps", p_distance: null, p_won: outcome === "win" })
+          .then(({ error }) => {
+            if (error) dbg(`minigame score save failed: ${error.message}`);
+          });
+      }
+      if (outcome === "win") {
+        pulseHappy();
+        sfx(Sounds.playSqueak);
+      }
+      dbg(`RPS vs ${opponentName}: ${outcome}`);
+    },
+    [game, pulseHappy, sfx, dbg],
+  );
   const room = useRoom({
     userId: auth.userId,
     displayName: auth.displayName || auth.email?.split("@")[0] || "Player",
@@ -497,7 +585,41 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     isEgg: game.isEgg,
     onSocialPet,
     onBattleResolved,
+    onMinigameResolved,
   });
+
+  // Target Toss game over → each participant logs its OWN result exactly
+  // once: a history entry (no progression rewards, same rule as RPS) plus a
+  // minigame_scores row via the atomic RPC (p_distance = my best throw of
+  // the main phase, for the lifetime best_score).
+  const tossRecordedRef = useRef(false);
+  useEffect(() => {
+    const g = room.tossGame;
+    if (!g) {
+      tossRecordedRef.current = false;
+      return;
+    }
+    if (g.core.winners.length === 0 || tossRecordedRef.current || !auth.userId) return;
+    if (!g.core.order.includes(auth.userId)) return;
+    tossRecordedRef.current = true;
+    const won = g.core.winners.includes(auth.userId);
+    const myDistances = g.core.events
+      .filter((e) => e.userId === auth.userId && e.distance !== null)
+      .map((e) => e.distance!) ;
+    const best = myDistances.length > 0 ? Math.min(...myDistances) : null;
+    game.applyMinigameResult(won ? "win" : "lose", "Target Toss");
+    if (supabase) {
+      void supabase
+        .rpc("record_minigame_result", { p_game_code: "target_toss", p_distance: best, p_won: won })
+        .then(({ error }) => {
+          if (error) dbg(`toss score save failed: ${error.message}`);
+        });
+    }
+    if (won) {
+      pulseHappy();
+      sfx(Sounds.playEvolution);
+    }
+  }, [room.tossGame, auth.userId, game, pulseHappy, sfx, dbg]);
 
   // Publish my pet's position (normalized to screen fraction so every
   // member's monitor maps it proportionally) while in a room.
@@ -1224,11 +1346,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     visual = renderPetSprite();
   }
 
-  const needsAttention =
-    save.isAlive &&
-    !save.isSleeping &&
-    ((game.isEgg ? save.warmth : save.hunger) < 25 || save.cleanliness < 25 || save.happiness < 25);
-
   const spawnEggShards = useCallback((count: number) => {
     setEggShards((prev) => [
       ...prev,
@@ -1468,6 +1585,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     },
   };
 
+  // Don't flash the picker while the cloud save is still loading — an
+  // existing player signing in on a new device starts from a fresh local
+  // save (eggChosen false) until their authoritative row arrives.
+  if (!save.eggChosen && game.syncStatus !== "loading") {
+    return <EggSelect onChoose={() => game.chooseEgg("cat")} />;
+  }
+
   return (
     <>
       {/* Dev-only state badge — display only, never interactive. */}
@@ -1531,6 +1655,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onGrabBall={grabBall}
         canClean={canClean}
         onStartClean={startCleaning}
+        canWarm={game.isEgg && save.isAlive && !petBusy}
+        onStartWarm={startWarming}
         soundEnabled={prefs.soundEnabled}
         onToggleSound={prefs.toggleSound}
         followSpeed={prefs.followSpeed}
@@ -1557,6 +1683,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       {/* Online room layer: friends' pets + the room bar. */}
       <RemotePets room={room} />
       <RoomBar room={room} />
+      {room.tossGame && auth.userId && <TargetToss room={room} userId={auth.userId} />}
 
       {/* Food — always mounted, positioned purely via foodX/foodY motion
           values animated by throwFood. No pointer events of its own. */}
@@ -1742,6 +1869,107 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         </>
       )}
 
+      {/* Egg warm mode: light-source cursor + instruction panel */}
+      {warmingMode && (
+        <>
+          <div
+            data-interactive
+            style={{
+              position: "fixed",
+              bottom: 90,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 21000,
+              padding: "8px 30px 8px 16px",
+              borderRadius: 14,
+              background: warmHeld ? "rgba(78,45,10,0.92)" : "rgba(20,20,26,0.88)",
+              color: "#fde68a",
+              fontSize: 12,
+              fontWeight: 700,
+              textAlign: "center",
+            }}
+          >
+            <button
+              data-interactive
+              onClick={endWarming}
+              onMouseDown={(e) => e.stopPropagation()}
+              title="Put the light away"
+              style={{
+                position: "absolute",
+                top: 4,
+                right: 6,
+                cursor: "pointer",
+                border: "none",
+                background: "transparent",
+                color: "#fde68a",
+                fontSize: 14,
+                fontWeight: 900,
+                padding: 2,
+                lineHeight: 1,
+              }}
+            >
+              ✕
+            </button>
+            Hold the light over the egg to warm it
+            <div style={{ marginTop: 4, fontSize: 10, fontWeight: 600, opacity: 0.8 }}>
+              {warmHeld
+                ? game.isEggOverheating
+                  ? "Too hot! Let it breathe"
+                  : "Warming…"
+                : "Hold left mouse over the egg"}
+              {" · Esc, right-click, or ✕ to stop"}
+            </div>
+          </div>
+          {/* The light source itself — a layered glow orb that swells and
+              brightens while actually warming, angry-red when overheating. */}
+          <motion.div
+            style={{
+              position: "fixed",
+              left: warmCursor.x,
+              top: warmCursor.y,
+              width: 0,
+              height: 0,
+              pointerEvents: "none",
+              zIndex: 21002,
+            }}
+          >
+            <motion.div
+              animate={{
+                scale: warmHeld ? [1.15, 1.45, 1.15] : [0.85, 1, 0.85],
+                opacity: warmHeld ? [0.95, 1, 0.95] : [0.65, 0.8, 0.65],
+              }}
+              transition={{ duration: warmHeld ? 0.5 : 1.4, repeat: Infinity, ease: "easeInOut" }}
+              style={{
+                position: "absolute",
+                left: -55,
+                top: -55,
+                width: 110,
+                height: 110,
+                borderRadius: "50%",
+                background: game.isEggOverheating
+                  ? "radial-gradient(circle, rgba(254,202,202,0.95) 0%, rgba(248,113,113,0.55) 40%, rgba(239,68,68,0.18) 65%, transparent 75%)"
+                  : "radial-gradient(circle, rgba(255,244,214,0.95) 0%, rgba(253,224,71,0.5) 40%, rgba(245,158,11,0.16) 65%, transparent 75%)",
+                filter: "blur(1px)",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: -9,
+                top: -9,
+                width: 18,
+                height: 18,
+                borderRadius: "50%",
+                background: game.isEggOverheating ? "#fecaca" : "#fef3c7",
+                boxShadow: game.isEggOverheating
+                  ? "0 0 18px 8px rgba(248,113,113,0.85)"
+                  : "0 0 18px 8px rgba(253,224,71,0.8)",
+              }}
+            />
+          </motion.div>
+        </>
+      )}
+
       {/* Egg's "back" panel during the burst: a separate, lower z-index
           sibling of the pet's own container (see the ordering note on the
           pet container's style below) so the real pet visually sits in
@@ -1787,12 +2015,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         }}
         {...(save.isAlive && !petBusy ? petDragHandlers : {})}
       >
-        {/* Status blip above the pet — sleeping already has PetEffects' own
-            animated ZZZ particles, no need for a second static icon. */}
-        {needsAttention && (
-          <div style={{ position: "absolute", top: -18, right: 8, fontSize: 18, pointerEvents: "none" }}>❗</div>
-        )}
-
         {/* My own room chat bubble + emote, mirroring what friends see. */}
         {auth.userId && room.activeGroup && room.bubbles[auth.userId] && Date.now() - room.bubbles[auth.userId]!.at < 6000 && (
           <div
@@ -1884,9 +2106,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
                   });
                 }
           }
-          onPointerDown={!hatchCutsceneActive && game.isEgg && save.isAlive && !petBusy ? startWarmHold : undefined}
-          onPointerUp={!hatchCutsceneActive && game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
-          onPointerLeave={!hatchCutsceneActive && game.isEgg && save.isAlive && !petBusy ? stopWarmHold : undefined}
+          // Warming moved to the SideDock lamp (warm mode) — no direct
+          // hold-on-egg pointer gesture here anymore.
           style={{
             cursor: "pointer",
             width: PET_SIZE,
@@ -1903,7 +2124,28 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           }}
         >
           <div className={bodyClass} style={{ width: PET_SIZE, height: PET_SIZE, position: "relative" }}>
-            {visual}
+            {/* Display-scale wrapper (see PET_DISPLAY_SCALE): a dedicated
+                node so its transform never fights bodyClass's CSS keyframe
+                transforms. Scale stays 1 through the whole egg/hatch
+                cutscene and springs down to 0.7 the moment the pet has
+                jumped out of the shell (hatchCutsceneActive clears).
+                initial={false} renders already-hatched pets straight at
+                0.7 with no mount animation. */}
+            <motion.div
+              initial={false}
+              animate={{ scale: game.isEgg || hatchCutsceneActive ? 1 : PET_DISPLAY_SCALE }}
+              transition={{ type: "spring", stiffness: 60, damping: 15 }}
+              style={{
+                width: PET_SIZE,
+                height: PET_SIZE,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transformOrigin: "center",
+              }}
+            >
+              {visual}
+            </motion.div>
             <PetEffects
               trigger={fxTrigger}
               showEvolutionBurst={evolvePulse}

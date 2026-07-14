@@ -157,6 +157,45 @@ export function replayOfflineGap(
   let sleepKindAtEnd = prev.sleepKind;
   let sleepStartedAtEnd = prev.sleepStartedAt;
 
+  // Eggs don't sleep. After the attended window (autoSleepMs of idle) an egg
+  // goes DORMANT instead: it keeps cooling at the same gentle rate sleep
+  // decay uses (identical balance, no sleep flag/ZZZ), and a fully cold egg
+  // never dies — warmth bottoms out at 0 and hatch progress stalls, with the
+  // care-point neglect decay below as the real cost of abandonment.
+  if (isEggPhase) {
+    const idleAtClose = lastTick - new Date(prev.lastInteraction ?? prev.lastFed).getTime();
+    const msUntilDormant = prev.isSleeping ? 0 : Math.max(0, rules.autoSleepMs - idleAtClose);
+    const attendedMs = Math.min(totalMs, msUntilDormant);
+    stats = applyOfflineDecay(stats, true, attendedMs / 60_000, "awake", rules);
+    stats = applyOfflineDecay(stats, true, (totalMs - attendedMs) / 60_000, "sleep", rules);
+
+    const mins = totalMs / 60_000;
+    const penaltyRate =
+      (stats.warmth < 20 ? 0.5 : 0) +
+      (stats.cleanliness < 20 ? 0.3 : 0) +
+      (stats.happiness < 20 ? 0.2 : 0);
+    const floor = prev.carePointsFloor ?? 0;
+    const carePoints =
+      computeCanEvolve(prev, rules) || rules.progression.disableCarePointDecay
+        ? prev.carePoints
+        : Math.max(floor, prev.carePoints - penaltyRate * mins);
+
+    return {
+      hunger: stats.hunger,
+      warmth: stats.warmth,
+      cleanliness: stats.cleanliness,
+      happiness: stats.happiness,
+      carePoints,
+      isAlive: true,
+      // Wake any legacy sleeping-egg saves from before this rule existed.
+      isSleeping: false,
+      sleepKind: undefined,
+      sleepStartedAt: undefined,
+      lastDecayTick: now.toISOString(),
+      elapsedMinutes: Math.floor(mins),
+    };
+  }
+
   const wasManualProtected =
     prev.isSleeping && prev.sleepKind === "manual" && !!prev.sleepStartedAt;
 

@@ -125,6 +125,8 @@ export interface PetSaveData {
   carePointsFloor?: number;
   /** True once the pet has hatched from its egg (manual hatch at 200 care points). */
   hatched?: boolean;
+  /** True once the player has picked their starter egg on first launch. Existing saves are treated as already-chosen (see normalizePetSave). */
+  eggChosen?: boolean;
 
   lastFed: string; // ISO string
   lastWashed: string;
@@ -144,6 +146,21 @@ export interface PetSaveData {
   throwBallCount: number;
   overfeedCount: number;
   quests?: PetQuestState;
+  history?: HistoryEntry[];
+}
+
+export type HistoryEventCategory = "care" | "quest" | "achievement" | "evolution" | "penalty" | "social";
+
+/** A single timestamped, human-readable log entry — "what happened and what changed". */
+export interface HistoryEntry {
+  id: string;
+  at: string; // ISO timestamp
+  category: HistoryEventCategory;
+  label: string;
+  statKey?: string;
+  before?: number;
+  after?: number;
+  delta?: number;
 }
 
 export type AllSaves = Record<PetType, PetSaveData>;

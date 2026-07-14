@@ -5,13 +5,17 @@ description: >
   Realtime channel/presence/broadcast shapes, the deterministic seed-shared
   battle protocol, groups/invite-code flow, and the RemotePets/RoomBar UI
   data flow, from apps/desktop/src/online/useRoom.ts and
-  apps/desktop/src/game/useGroups.ts. USE THIS SKILL whenever the task
+  apps/desktop/src/game/useGroups.ts. Also covers the minigame layer: the
+  1:1 Rock-Paper-Scissors handshake, the room-wide Target Toss lobby
+  (invite/ready/start) and its event-log reducer turn system, and the
+  minigame_scores persistence convention. USE THIS SKILL whenever the task
   touches: rooms, presence, joining/creating/leaving a group, remote pets
   rendering on screen, chat bubbles or emotes, the challenge/battle flow, the
-  invite-code system, or debugging why a friend's pet/position/chat/battle
-  isn't showing up correctly for another player. Especially relevant right
-  now since online testing (multiple real accounts in a shared room) is an
-  active near-term priority for this project.
+  invite-code system, minigames (RPS, Target Toss, or adding a new one), or
+  debugging why a friend's pet/position/chat/battle/game isn't showing up
+  correctly for another player. Especially relevant right now since online
+  testing (multiple real accounts in a shared room) is an active near-term
+  priority for this project.
 ---
 
 # Online / realtime architecture
@@ -35,6 +39,18 @@ friends-testing scale.
 `broadcast: { self: false }` means your own broadcasts don't echo back to
 you — `sendChat`/`sendEmote` apply their effect to local state immediately
 (optimistic), THEN broadcast, rather than waiting for a round-trip.
+
+**supabase-js gotcha (caused a real bug once — respect it in any new
+channel code)**: `supabase.channel(topic)` dedupes by topic and returns the
+EXISTING instance if one is registered, and channel removal deregisters by
+TOPIC, not instance. So two features must never independently "own" the
+same `pet-room:<id>` topic: one would hijack the other's already-subscribed
+channel (`subscribe()` throws on a second call) or kill it on cleanup.
+SideDock's `useGroupPresenceCount` (read-only live member count in the
+groups menu) therefore piggybacks on an existing channel when one exists
+(polls `presenceState()`, never subscribes/removes), and `useRoom.join()`
+defensively frees the topic (awaits `removeChannel` of any stale observer)
+before building its own channel.
 
 ## Presence
 
@@ -143,6 +159,50 @@ no other realtime plumbing lives in either component.
   rendering `incomingInvite`/`outgoingInviteTo` banners and the battle
   reveal sequence, calling `room.clearBattle()` once the timed reveal
   finishes.
+
+## Minigames (Jul 2026) — RPS (1:1) and Target Toss (room-wide lobby)
+
+**Product rule: minigames grant ZERO progression rewards** (no happiness, no
+care points). Results are logged to local history and persisted per
+`(user_id, game_code)` in `minigame_scores` via the atomic
+`record_minigame_result(p_game_code, p_distance, p_won)` RPC — each
+participant's OWN client calls it exactly once on game over (RLS blocks
+writing anyone else's row). `RoomApi.selfId` exposes the local userId for UI
+that needs "am I the host / is it my turn".
+
+- **RPS** (`minigame` broadcast event, 1:1): invite/accept/decline/move
+  handshake mirroring the battle pattern; both clients resolve the same two
+  moves locally (`rpsOutcome`). Entry: 🎮 on a remote pet's mini-menu.
+- **Target Toss** (`mg` broadcast event with a `kind` discriminator —
+  functionally the plan's mg-invite/join/ready/roster/start/throw/skip/
+  cancel): room-wide lobby, host-authoritative pre-start ONLY. The host
+  rebroadcasts `roster` as ground truth on every join/ready (a join past the
+  cap yields a roster without the joiner = "turned away"); `start` bakes the
+  turn order. **After start there is NO host authority**: every client runs
+  pet-core's pure reducer (`initTossGame`/`applyTossEvent`/`currentTossTurn`
+  in `packages/pet-core/src/minigames/targetToss.ts`, fully unit-tested)
+  over the same ordered throw/skip log — main phase (3 round-robin rounds,
+  lowest distance wins a round) → sudden death among tied leaders (capped
+  at 3 all-skip passes → co-win). Every event carries a `seq` guard
+  (dropped unless it extends the local log exactly).
+- **AFK**: the active player's client self-skips at 15s; if the active
+  player LEFT the room (gone from presence), the first still-present
+  participant in turn order is the skip authority (not the host — a
+  departed host can't stall the game). Known low-probability race: a throw
+  sent right at the 15s boundary vs. an authority skip can apply in
+  different orders on different clients (both carry the same seq; first
+  arrival wins per client) — needs presence flap + exact timing; noted, not
+  yet fixed.
+- **Physics sync**: the thrower computes its landing locally and broadcasts
+  arc params (normalized 0..1 coords); every client (thrower included)
+  replays the identical `throwArc()` from `apps/desktop/src/game/
+  throwPhysics.ts` (extracted from GameView — feed/ball use the same
+  export). Distances are normalized to the target radius so different
+  monitor sizes compete fairly.
+- The arena (`apps/desktop/src/game/minigames/TargetToss.tsx`) is a
+  full-screen `data-interactive` overlay at zIndex 22000 (RoomBar's 23000
+  stays above it); GameView mounts it when `room.tossGame` is set and owns
+  the game-over history/RPC recording (`tossRecordedRef` one-shot guard).
 
 ## Debugging checklist for "X isn't showing up for the other player"
 

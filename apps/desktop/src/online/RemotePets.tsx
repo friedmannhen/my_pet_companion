@@ -6,10 +6,19 @@
 // or challenge it to a battle.
 import { useState } from "react";
 import { motion, useSpring } from "framer-motion";
-import { spriteFor, emojiFor } from "../game/petSprites";
+import { spriteFor, emojiFor, CAT_BABY_LAYERS } from "../game/petSprites";
 import type { RoomApi, RoomMember } from "./useRoom";
 
-const REMOTE_SIZE = 104;
+// Same cell + display-scale mechanism as GameView (128px cell, sprite drawn
+// full-cell and shrunk via transform: scale(0.7) centered in it) so a
+// friend's pet renders exactly like your own and stays centered at any
+// scale — never resize the imgs directly.
+const REMOTE_SIZE = 128;
+const REMOTE_DISPLAY_SCALE = 0.7;
+// The scaled sprite's visual edges inside the cell (transform-origin center),
+// so labels/bubbles/menus hug the art instead of the larger layout cell.
+const REMOTE_VISUAL_TOP = Math.round((REMOTE_SIZE * (1 - REMOTE_DISPLAY_SCALE)) / 2);
+const REMOTE_VISUAL_BOTTOM = REMOTE_SIZE - REMOTE_VISUAL_TOP;
 
 function RemotePet({
   member,
@@ -19,6 +28,7 @@ function RemotePet({
   emote,
   room,
   busy,
+  gameBusy,
 }: {
   member: RoomMember;
   nx: number;
@@ -27,6 +37,7 @@ function RemotePet({
   emote: string | null;
   room: RoomApi;
   busy: boolean;
+  gameBusy: boolean;
 }) {
   const targetX = nx * window.innerWidth - REMOTE_SIZE / 2;
   const targetY = ny * window.innerHeight - REMOTE_SIZE / 2;
@@ -37,6 +48,7 @@ function RemotePet({
   const [menuOpen, setMenuOpen] = useState(false);
 
   const sprite = spriteFor(member.petType, member.stage);
+  const isBabyCat = member.petType === "cat" && member.stage === 1;
 
   return (
     <motion.div
@@ -58,7 +70,7 @@ function RemotePet({
       <div
         style={{
           position: "absolute",
-          top: -22,
+          top: REMOTE_VISUAL_BOTTOM + 4,
           left: "50%",
           transform: "translateX(-50%)",
           whiteSpace: "nowrap",
@@ -80,7 +92,7 @@ function RemotePet({
         <div
           style={{
             position: "absolute",
-            bottom: REMOTE_SIZE + 4,
+            bottom: REMOTE_SIZE - REMOTE_VISUAL_TOP + 4,
             left: "50%",
             transform: "translateX(-50%)",
             maxWidth: 220,
@@ -118,9 +130,40 @@ function RemotePet({
         </motion.div>
       )}
 
-      {/* The pet — slightly translucent so it's clearly a visitor. */}
-      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.92 }}>
-        {sprite ? (
+      {/* The pet — slightly translucent so it's clearly a visitor. Scaled by
+          transform so it stays centered in the cell at any display scale. */}
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: 0.92,
+          transform: `scale(${REMOTE_DISPLAY_SCALE})`,
+          transformOrigin: "center",
+        }}
+      >
+        {isBabyCat ? (
+          <div style={{ position: "relative", width: REMOTE_SIZE, height: REMOTE_SIZE }}>
+            <img
+              src={CAT_BABY_LAYERS.tail}
+              width={REMOTE_SIZE}
+              height={REMOTE_SIZE}
+              draggable={false}
+              alt=""
+              style={{ position: "absolute", inset: 0, zIndex: 0 }}
+            />
+            <img
+              src={CAT_BABY_LAYERS.body}
+              width={REMOTE_SIZE}
+              height={REMOTE_SIZE}
+              draggable={false}
+              alt={member.petName}
+              style={{ position: "absolute", inset: 0, zIndex: 1 }}
+            />
+          </div>
+        ) : sprite ? (
           <img src={sprite} width={REMOTE_SIZE} height={REMOTE_SIZE} draggable={false} alt={member.petName} />
         ) : (
           <span style={{ fontSize: 64 }}>{emojiFor(member.petType)}</span>
@@ -132,7 +175,7 @@ function RemotePet({
         <div
           style={{
             position: "absolute",
-            top: REMOTE_SIZE - 6,
+            top: REMOTE_VISUAL_BOTTOM - 6,
             left: "50%",
             transform: "translateX(-50%)",
             display: "flex",
@@ -154,6 +197,26 @@ function RemotePet({
             }}
           >
             🤗
+          </button>
+          <button
+            title={gameBusy ? "A game is already going" : `Play Rock-Paper-Scissors with ${member.name}`}
+            disabled={gameBusy}
+            style={{
+              cursor: gameBusy ? "default" : "pointer",
+              border: "none",
+              borderRadius: 7,
+              padding: "5px 9px",
+              fontSize: 14,
+              background: "rgba(96,165,250,0.3)",
+              opacity: gameBusy ? 0.4 : 1,
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              room.inviteMinigame(member.userId);
+              setMenuOpen(false);
+            }}
+          >
+            🎮
           </button>
           <button
             title={busy ? "Battle already in progress" : `Challenge ${member.petName} to a battle`}
@@ -184,6 +247,7 @@ function RemotePet({
 export function RemotePets({ room }: { room: RoomApi }) {
   if (!room.activeGroup) return null;
   const busy = room.battle !== null || room.outgoingInviteTo !== null;
+  const gameBusy = room.minigame !== null || room.outgoingGameInviteTo !== null;
   return (
     <>
       {room.members.map((m) => {
@@ -201,6 +265,7 @@ export function RemotePets({ room }: { room: RoomApi }) {
             emote={emote ? emote.emoji : null}
             room={room}
             busy={busy}
+            gameBusy={gameBusy}
           />
         );
       })}

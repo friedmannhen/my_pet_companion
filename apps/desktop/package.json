@@ -1,6 +1,6 @@
 {
   "name": "@pet/desktop",
-  "version": "0.1.2",
+  "version": "0.1.21",
   "private": true,
   "license": "UNLICENSED",
   "main": "out/main/main.js",
@@ -43,6 +43,7 @@
     ],
     "asar": true,
     "win": {
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "nsis",

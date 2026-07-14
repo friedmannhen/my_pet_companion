@@ -41,6 +41,7 @@ import type { RibbonSide } from "./useRibbonPrefs";
 import type { FollowSpeed } from "./useGamePrefs";
 import { useLeaderboard, LEADERBOARD_METRICS, type LeaderboardMetric } from "./useLeaderboard";
 import { useFriends, type PlayerSearchResult } from "./useFriends";
+import type { UseNotifications } from "../online/useNotifications";
 import type { GroupInfo, UseGroups } from "./useGroups";
 import { supabase } from "../supabase/client";
 import "./hud.css";
@@ -100,6 +101,136 @@ function useGroupPresenceCount(groupId: string | null): number | null {
     };
   }, [groupId, nonce]);
   return count;
+}
+
+/** One "My groups" card — its own component so every row can run
+ *  useGroupPresenceCount unconditionally (hooks can't run in the parent's
+ *  loop). Membership info is always visible now — no expand/collapse. */
+function GroupRow({
+  group: g,
+  inThisRoom,
+  canGoOnline,
+  onEnterRoom,
+  onLeaveRoom,
+  onDelete,
+}: {
+  group: GroupInfo;
+  inThisRoom: boolean;
+  canGoOnline: boolean;
+  onEnterRoom: (group: GroupInfo) => void;
+  onLeaveRoom: () => void;
+  onDelete: () => void;
+}) {
+  const liveCount = useGroupPresenceCount(g.id);
+  const [copied, setCopied] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const isOwner = g.role === "owner" && g.groupType !== "global";
+
+  return (
+    <div
+      style={{
+        borderRadius: 10,
+        background: inThisRoom ? "rgba(52,211,153,0.12)" : "rgba(255,255,255,0.05)",
+        border: inThisRoom ? "1px solid rgba(52,211,153,0.4)" : "1px solid transparent",
+        padding: "8px 10px",
+        marginBottom: 8,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <strong
+          style={{
+            fontSize: 12,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            minWidth: 0,
+            flex: 1,
+          }}
+        >
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+            {g.groupType === "global" ? "🌍" : "👥"} {g.name}
+          </span>
+          {/* Live-presence badge: one green dot per player currently in the
+              room (capped), inline with the name. */}
+          {liveCount !== null && liveCount > 0 && (
+            <span
+              title={`${liveCount} ${liveCount === 1 ? "player" : "players"} in this room right now`}
+              style={{ fontSize: 8, letterSpacing: 1, opacity: 0.9, flexShrink: 0, fontWeight: 400 }}
+            >
+              {"🟢".repeat(Math.min(liveCount, 5))}
+              {liveCount > 5 && <span style={{ fontSize: 10, opacity: 0.8 }}> +{liveCount - 5}</span>}
+            </span>
+          )}
+        </strong>
+        {inThisRoom ? (
+          <button style={{ ...chipStyle, background: "rgba(248,113,113,0.35)", flexShrink: 0 }} onClick={onLeaveRoom}>
+            Leave room
+          </button>
+        ) : (
+          <button
+            style={{ ...chipStyle, background: "rgba(52,211,153,0.35)", flexShrink: 0, opacity: canGoOnline ? 1 : 0.4 }}
+            disabled={!canGoOnline}
+            title={canGoOnline ? "Go online in this group's room" : "Hatch your egg first"}
+            onClick={() => onEnterRoom(g)}
+          >
+            🌐 Enter room
+          </button>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 10, opacity: 0.75 }}>
+        {g.inviteCode && g.groupType !== "global" && (
+          <>
+            <span>
+              Invite code: <strong style={{ letterSpacing: 1 }}>{g.inviteCode}</strong>
+            </span>
+            <button
+              style={{ ...chipStyle, padding: "1px 6px", fontSize: 10 }}
+              onClick={() => {
+                void navigator.clipboard.writeText(g.inviteCode!);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+            >
+              {copied ? "✓ copied" : "copy"}
+            </button>
+          </>
+        )}
+        {g.groupType === "global" && <span>Everyone is here automatically.</span>}
+        <span style={{ marginLeft: "auto", opacity: 0.6 }}>{g.role}</span>
+      </div>
+      {isOwner && (
+        <div style={{ marginTop: 6 }}>
+          {confirmingDelete ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10 }}>
+              <span style={{ opacity: 0.8 }}>Delete this group? Everyone will be removed.</span>
+              <button
+                style={{ ...chipStyle, padding: "1px 6px", fontSize: 10, background: "rgba(248,113,113,0.45)" }}
+                onClick={() => {
+                  setConfirmingDelete(false);
+                  onDelete();
+                }}
+              >
+                Confirm
+              </button>
+              <button style={{ ...chipStyle, padding: "1px 6px", fontSize: 10 }} onClick={() => setConfirmingDelete(false)}>
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              style={{ ...chipStyle, padding: "1px 6px", fontSize: 10, background: "rgba(248,113,113,0.2)" }}
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete group
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const rules = DEFAULT_PET_RULES;
@@ -330,7 +461,6 @@ export interface SideDockProps {
   onSideChange: (side: RibbonSide) => void;
   open: boolean;
   onToggle: () => void;
-  onClose: () => void;
   game: PetGame;
   auth: AuthState;
   lease: SessionLease;
@@ -359,6 +489,10 @@ export interface SideDockProps {
   updateError: string | null;
   onInstallUpdate: () => void;
   groupsApi: UseGroups;
+  /** Personal realtime inbox — friend/room-invite notifications. */
+  notifications: UseNotifications;
+  /** External "open at this view" request (notification clicks). */
+  viewRequest: { view: "friends" | "groups"; n: number } | null;
   /** Group id of the room we're currently in (null = offline). */
   activeRoomGroupId: string | null;
   /** False while the pet is still an egg — online play is locked. */
@@ -374,7 +508,6 @@ export function SideDock({
   onSideChange,
   open,
   onToggle,
-  onClose,
   game,
   auth,
   lease,
@@ -402,6 +535,8 @@ export function SideDock({
   updateError,
   onInstallUpdate,
   groupsApi,
+  notifications,
+  viewRequest,
   activeRoomGroupId,
   canGoOnline,
   onEnterRoom,
@@ -411,10 +546,6 @@ export function SideDock({
   const [view, setView] = useState<"home" | "quests" | "awards" | "ranks" | "groups" | "friends" | "history" | "settings">("home");
   const [groupNameDraft, setGroupNameDraft] = useState("");
   const [joinCodeDraft, setJoinCodeDraft] = useState("");
-  const [copiedCode, setCopiedCode] = useState<string | null>(null);
-  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-  const expandedPresenceCount = useGroupPresenceCount(expandedGroupId);
   const [nameDraft, setNameDraft] = useState(save.name);
   const [renameSaved, setRenameSaved] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(auth.displayName ?? "");
@@ -445,6 +576,33 @@ export function SideDock({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsActive]);
+  // Notification clicks steer the dock to a specific view.
+  useEffect(() => {
+    if (viewRequest) setView(viewRequest.view);
+  }, [viewRequest]);
+
+  // Shared join-with-code submit: joins AND enters the room in one step
+  // (typing a full 6-char code, Enter, and the button all use this).
+  // Ref-guarded so a fast paste can't double-submit.
+  const joiningCodeRef = useRef(false);
+  const submitJoinCode = (code: string) => {
+    const trimmed = code.trim();
+    if (trimmed.length < 4 || joiningCodeRef.current) return;
+    joiningCodeRef.current = true;
+    void groupsApi
+      .join(trimmed)
+      .then((joined) => {
+        setJoinCodeDraft("");
+        if (joined) {
+          game.logHistoryEvent({ category: "social", label: `Joined group "${joined.name}"` });
+          onEnterRoom(joined);
+        }
+      })
+      .finally(() => {
+        joiningCodeRef.current = false;
+      });
+  };
+  const myName = auth.displayName || auth.email?.split("@")[0] || "A friend";
   const [rankMetric, setRankMetric] = useState<LeaderboardMetric>("carePoints");
   const leaderboard = useLeaderboard(auth.userId, open && view === "ranks", rankMetric);
   // Fetched whenever the dock opens (not just the friends view) so the nav
@@ -629,12 +787,16 @@ export function SideDock({
           overflow: "hidden",
         }}
       >
+        {/* Two-row header: title, then the nav strip. One row overflowed the
+            340px drawer (9 × 26px buttons + title) and pushed the old ✕
+            button clean out of view — the ✕ is gone entirely (the house tab
+            that opens the drawer also closes it). */}
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 10px 10px 18px",
+            flexDirection: "column",
+            gap: 8,
+            padding: "12px 18px 10px",
             flexShrink: 0,
           }}
         >
@@ -686,21 +848,6 @@ export function SideDock({
               }}
             >
               <img src={settingsIcon} alt="Settings" width={16} height={16} draggable={false} />
-            </button>
-            <button
-              onClick={onClose}
-              style={{
-                cursor: "pointer",
-                border: "none",
-                borderRadius: 6,
-                width: 26,
-                height: 26,
-                background: "rgba(255,255,255,0.1)",
-                color: "#fff",
-                fontSize: 13,
-              }}
-            >
-              ✕
             </button>
           </div>
         </div>
@@ -1021,112 +1168,22 @@ export function SideDock({
               {groupsApi.error && (
                 <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>⚠️ {groupsApi.error}</div>
               )}
-              {groupsApi.groups.map((g) => {
-                const inThisRoom = activeRoomGroupId === g.id;
-                const isOwner = g.role === "owner" && g.groupType !== "global";
-                const isExpanded = expandedGroupId === g.id;
-                const isConfirmingDelete = confirmingDeleteId === g.id;
-                return (
-                  <div
-                    key={g.id}
-                    style={{
-                      borderRadius: 10,
-                      background: inThisRoom ? "rgba(52,211,153,0.12)" : "rgba(255,255,255,0.05)",
-                      border: inThisRoom ? "1px solid rgba(52,211,153,0.4)" : "1px solid transparent",
-                      padding: "8px 10px",
-                      marginBottom: 8,
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                      <strong
-                        style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}
-                        onClick={() => setExpandedGroupId((id) => (id === g.id ? null : g.id))}
-                        title="Show who's live in this room"
-                      >
-                        {g.groupType === "global" ? "🌍" : "👥"} {g.name} {isExpanded ? "▲" : "▼"}
-                      </strong>
-                      {inThisRoom ? (
-                        <button style={{ ...chipStyle, background: "rgba(248,113,113,0.35)", flexShrink: 0 }} onClick={onLeaveRoom}>
-                          Leave room
-                        </button>
-                      ) : (
-                        <button
-                          style={{ ...chipStyle, background: "rgba(52,211,153,0.35)", flexShrink: 0, opacity: canGoOnline ? 1 : 0.4 }}
-                          disabled={!canGoOnline}
-                          title={canGoOnline ? "Go online in this group's room" : "Hatch your egg first"}
-                          onClick={() => onEnterRoom(g)}
-                        >
-                          🌐 Enter room
-                        </button>
-                      )}
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 10, opacity: 0.75 }}>
-                      {g.inviteCode && g.groupType !== "global" && (
-                        <>
-                          <span>
-                            Invite code: <strong style={{ letterSpacing: 1 }}>{g.inviteCode}</strong>
-                          </span>
-                          <button
-                            style={{ ...chipStyle, padding: "1px 6px", fontSize: 10 }}
-                            onClick={() => {
-                              void navigator.clipboard.writeText(g.inviteCode!);
-                              setCopiedCode(g.id);
-                              setTimeout(() => setCopiedCode((c) => (c === g.id ? null : c)), 1500);
-                            }}
-                          >
-                            {copiedCode === g.id ? "✓ copied" : "copy"}
-                          </button>
-                        </>
-                      )}
-                      {g.groupType === "global" && <span>Everyone is here automatically.</span>}
-                      <span style={{ marginLeft: "auto", opacity: 0.6 }}>{g.role}</span>
-                    </div>
-                    {isExpanded && (
-                      <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 10, opacity: 0.8 }}>
-                        {expandedPresenceCount === null
-                          ? "Checking who's live…"
-                          : expandedPresenceCount === 0
-                            ? "Nobody is in this room right now."
-                            : `${expandedPresenceCount} ${expandedPresenceCount === 1 ? "person" : "people"} live in this room right now.`}
-                      </div>
-                    )}
-                    {isOwner && (
-                      <div style={{ marginTop: 6 }}>
-                        {isConfirmingDelete ? (
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10 }}>
-                            <span style={{ opacity: 0.8 }}>Delete this group? Everyone will be removed.</span>
-                            <button
-                              style={{ ...chipStyle, padding: "1px 6px", fontSize: 10, background: "rgba(248,113,113,0.45)" }}
-                              onClick={() => {
-                                if (inThisRoom) onLeaveRoom();
-                                setConfirmingDeleteId(null);
-                                void groupsApi.deleteGroup(g.id).then((ok) => {
-                                  if (ok) game.logHistoryEvent({ category: "social", label: `Deleted group "${g.name}"` });
-                                });
-                              }}
-                            >
-                              Confirm
-                            </button>
-                            <button
-                              style={{ ...chipStyle, padding: "1px 6px", fontSize: 10 }}
-                              onClick={() => setConfirmingDeleteId(null)}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            style={{ ...chipStyle, padding: "1px 6px", fontSize: 10, background: "rgba(248,113,113,0.2)" }}
-                            onClick={() => setConfirmingDeleteId(g.id)}
-                          >
-                            Delete group
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+              {groupsApi.groups.map((g) => (
+                <GroupRow
+                  key={g.id}
+                  group={g}
+                  inThisRoom={activeRoomGroupId === g.id}
+                  canGoOnline={canGoOnline}
+                  onEnterRoom={onEnterRoom}
+                  onLeaveRoom={onLeaveRoom}
+                  onDelete={() => {
+                    if (activeRoomGroupId === g.id) onLeaveRoom();
+                    void groupsApi.deleteGroup(g.id).then((ok) => {
+                      if (ok) game.logHistoryEvent({ category: "social", label: `Deleted group "${g.name}"` });
+                    });
+                  }}
+                />
+              ))}
               {groupsApi.groups.length === 0 && !groupsApi.loading && (
                 <div style={{ fontSize: 12, opacity: 0.6 }}>No groups yet — create one below.</div>
               )}
@@ -1184,14 +1241,16 @@ export function SideDock({
               <div style={{ display: "flex", gap: 6 }}>
                 <input
                   value={joinCodeDraft}
-                  onChange={(e) => setJoinCodeDraft(e.target.value.toUpperCase())}
+                  onChange={(e) => {
+                    const code = e.target.value.toUpperCase();
+                    setJoinCodeDraft(code);
+                    // Codes are exactly 6 chars — auto-join (and enter the
+                    // room) the moment a full code is typed/pasted, no extra
+                    // click. Ref-guarded against double-submit on fast paste.
+                    if (code.trim().length === 6) submitJoinCode(code);
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && joinCodeDraft.trim().length >= 4) {
-                      void groupsApi.join(joinCodeDraft).then((joined) => {
-                        setJoinCodeDraft("");
-                        if (joined) game.logHistoryEvent({ category: "social", label: `Joined group "${joined.name}"` });
-                      });
-                    }
+                    if (e.key === "Enter" && joinCodeDraft.trim().length >= 4) submitJoinCode(joinCodeDraft);
                   }}
                   maxLength={8}
                   placeholder="ABC123"
@@ -1210,12 +1269,7 @@ export function SideDock({
                 <button
                   style={{ ...chipStyle, opacity: joinCodeDraft.trim().length >= 4 ? 1 : 0.5 }}
                   disabled={joinCodeDraft.trim().length < 4}
-                  onClick={() =>
-                    void groupsApi.join(joinCodeDraft).then((joined) => {
-                      setJoinCodeDraft("");
-                      if (joined) game.logHistoryEvent({ category: "social", label: `Joined group "${joined.name}"` });
-                    })
-                  }
+                  onClick={() => submitJoinCode(joinCodeDraft)}
                 >
                   Join
                 </button>
@@ -1304,6 +1358,7 @@ export function SideDock({
                             style={{ ...chipStyle, padding: "4px 8px", fontSize: 11 }}
                             onClick={() => {
                               void friendsApi.request(r.userId);
+                              notifications.sendTo(r.userId, { kind: "friend_request", fromName: myName });
                               setFriendQuery("");
                             }}
                           >
@@ -1341,7 +1396,10 @@ export function SideDock({
                     <span style={{ flex: 1 }}>{f.name}</span>
                     <button
                       style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(52,211,153,0.3)" }}
-                      onClick={() => void friendsApi.accept(f.userId)}
+                      onClick={() => {
+                        void friendsApi.accept(f.userId);
+                        notifications.sendTo(f.userId, { kind: "friend_accepted", fromName: myName });
+                      }}
                     >
                       ✓ Accept
                     </button>
@@ -1380,6 +1438,29 @@ export function SideDock({
                 >
                   <span>🤝</span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                  {/* Invite to my current room — only shown while actually in one. */}
+                  {activeRoomGroupId &&
+                    (() => {
+                      const g = groupsApi.groups.find((gr) => gr.id === activeRoomGroupId);
+                      if (!g) return null;
+                      return (
+                        <button
+                          title={`Invite ${f.name} to ${g.name}`}
+                          style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(52,211,153,0.25)" }}
+                          onClick={() =>
+                            notifications.sendTo(f.userId, {
+                              kind: "room_invite",
+                              fromName: myName,
+                              groupId: g.id,
+                              groupName: g.name,
+                              inviteCode: g.inviteCode ?? undefined,
+                            })
+                          }
+                        >
+                          🌐 Invite
+                        </button>
+                      );
+                    })()}
                   <button
                     title={`Remove ${f.name} from friends`}
                     style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(248,113,113,0.2)" }}

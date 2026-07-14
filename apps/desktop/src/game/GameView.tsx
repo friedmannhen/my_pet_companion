@@ -37,10 +37,12 @@ import { useAppUpdate } from "./useAppUpdate";
 import { useConsumables } from "./useConsumables";
 import { useGamePrefs } from "./useGamePrefs";
 import { useGroups } from "./useGroups";
-import { useRoom } from "../online/useRoom";
+import { useRoom, RPS_REVEAL_MS } from "../online/useRoom";
+import { useNotifications } from "../online/useNotifications";
 import { RemotePets } from "../online/RemotePets";
 import { RoomBar } from "../online/RoomBar";
 import { TargetToss } from "./minigames/TargetToss";
+import { RockPaperScissors } from "./minigames/RockPaperScissors";
 import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
@@ -534,6 +536,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   // ── Online: groups + realtime room ──────────────────────────────────────
   const groupsApi = useGroups(auth.userId);
+  // Personal realtime inbox (friend requests/accepts, room invites) — no DB
+  // persistence, works with or without an active room.
+  const notifications = useNotifications(auth.userId);
+  // Lets notification clicks open the dock at a specific view.
+  const [dockViewRequest, setDockViewRequest] = useState<{ view: "friends" | "groups"; n: number } | null>(null);
+  const openDockAt = useCallback((view: "friends" | "groups") => {
+    setStatsOpen(true);
+    setDockViewRequest((prev) => ({ view, n: (prev?.n ?? 0) + 1 }));
+  }, []);
   const onSocialPet = useCallback(
     (fromName: string) => {
       game.receiveSocialPet();
@@ -571,8 +582,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           });
       }
       if (outcome === "win") {
-        pulseHappy();
-        sfx(Sounds.playSqueak);
+        // The modal holds a 3s reveal drumroll — celebrate when it lands,
+        // not the instant the (already-known) outcome resolves.
+        setTimeout(() => {
+          pulseHappy();
+          sfx(Sounds.playSqueak);
+        }, RPS_REVEAL_MS);
       }
       dbg(`RPS vs ${opponentName}: ${outcome}`);
     },
@@ -1544,7 +1559,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           key: "follow",
           icon: isFollowing ? "🛑" : "🧲",
           label: isFollowing ? "Stop Follow" : "Follow Me",
-          onClick: () => setIsFollowing((f) => !f),
+          onClick: () => {
+            setIsFollowing((f) => !f);
+            // Close the menu so the chase starts immediately — an open menu
+            // pauses following (followingActive gates on !menuOpen).
+            setMenuOpen(false);
+          },
         },
         { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
       ];
@@ -1642,7 +1662,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onSideChange={ribbon.setSide}
         open={statsOpen}
         onToggle={() => setStatsOpen((o) => !o)}
-        onClose={() => setStatsOpen(false)}
         game={game}
         auth={auth}
         lease={lease}
@@ -1670,6 +1689,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         updateError={appUpdate.updateError}
         onInstallUpdate={appUpdate.installUpdate}
         groupsApi={groupsApi}
+        notifications={notifications}
+        viewRequest={dockViewRequest}
         activeRoomGroupId={room.activeGroup?.id ?? null}
         canGoOnline={!game.isEgg && save.isAlive}
         onEnterRoom={(g) => {
@@ -1683,7 +1704,81 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       {/* Online room layer: friends' pets + the room bar. */}
       <RemotePets room={room} />
       <RoomBar room={room} />
+      {/* Room invite banner — outside RoomBar on purpose: RoomBar renders
+          nothing when you're not in a room, and an invite must be visible
+          precisely then. */}
+      {notifications.roomInvite && room.activeGroup?.id !== notifications.roomInvite.groupId && (
+        <div
+          data-interactive
+          style={{
+            position: "fixed",
+            bottom: 64,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 23000,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            borderRadius: 12,
+            background: "rgba(6,78,59,0.95)",
+            color: "#fff",
+            fontSize: 13,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+            fontFamily: "'Segoe UI', system-ui, sans-serif",
+          }}
+        >
+          🌐 {notifications.roomInvite.fromName} invited you to{" "}
+          <strong>{notifications.roomInvite.groupName ?? "a room"}</strong>
+          <button
+            style={{
+              cursor: "pointer",
+              border: "none",
+              borderRadius: 7,
+              padding: "4px 10px",
+              fontSize: 12,
+              fontWeight: 700,
+              background: "rgba(52,211,153,0.85)",
+              color: "#06281c",
+            }}
+            onClick={() => {
+              const inv = notifications.roomInvite!;
+              notifications.dismissRoomInvite();
+              const known = groupsApi.groups.find((g) => g.id === inv.groupId);
+              if (known) {
+                room.join(known);
+                dbg(`joined room ${known.name} via invite`);
+              } else if (inv.inviteCode) {
+                void groupsApi.join(inv.inviteCode).then((joined) => {
+                  if (joined) {
+                    room.join(joined);
+                    game.logHistoryEvent({ category: "social", label: `Joined group "${joined.name}"` });
+                    dbg(`joined room ${joined.name} via invite code`);
+                  }
+                });
+              }
+            }}
+          >
+            Join
+          </button>
+          <button
+            style={{
+              cursor: "pointer",
+              border: "none",
+              borderRadius: 7,
+              padding: "4px 8px",
+              fontSize: 12,
+              background: "rgba(255,255,255,0.12)",
+              color: "#fff",
+            }}
+            onClick={notifications.dismissRoomInvite}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {room.tossGame && auth.userId && <TargetToss room={room} userId={auth.userId} />}
+      {room.minigame && auth.userId && <RockPaperScissors room={room} userId={auth.userId} mySave={save} />}
 
       {/* Food — always mounted, positioned purely via foodX/foodY motion
           values animated by throwFood. No pointer events of its own. */}
@@ -2015,8 +2110,46 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         }}
         {...(save.isAlive && !petBusy ? petDragHandlers : {})}
       >
+        {/* Notification bubble — the pet "tells" you about friend requests /
+            accepts / room invites. Same look as the chat bubble but clickable
+            (opens the dock at the relevant view) and independent of any room. */}
+        {notifications.toast && (
+          <div
+            data-interactive
+            onClick={() => {
+              openDockAt(notifications.toast!.kind === "room_invite" ? "groups" : "friends");
+              notifications.dismissToast();
+            }}
+            title="Open"
+            style={{
+              position: "absolute",
+              bottom: PET_SIZE + 6,
+              left: "50%",
+              transform: "translateX(-50%)",
+              maxWidth: 240,
+              fontSize: 12,
+              padding: "6px 10px",
+              borderRadius: 12,
+              background: "rgba(255,255,255,0.97)",
+              color: "#1f2937",
+              cursor: "pointer",
+              boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              zIndex: 5,
+            }}
+          >
+            {notifications.toast.kind === "friend_request"
+              ? `🤝 ${notifications.toast.fromName} sent you a friend request!`
+              : notifications.toast.kind === "friend_accepted"
+                ? `🎉 ${notifications.toast.fromName} accepted your friend request!`
+                : `🌐 ${notifications.toast.fromName} invited you to ${notifications.toast.groupName ?? "a room"}!`}
+          </div>
+        )}
+
         {/* My own room chat bubble + emote, mirroring what friends see. */}
-        {auth.userId && room.activeGroup && room.bubbles[auth.userId] && Date.now() - room.bubbles[auth.userId]!.at < 6000 && (
+        {auth.userId && room.activeGroup && !notifications.toast && room.bubbles[auth.userId] && Date.now() - room.bubbles[auth.userId]!.at < 6000 && (
           <div
             style={{
               position: "absolute",

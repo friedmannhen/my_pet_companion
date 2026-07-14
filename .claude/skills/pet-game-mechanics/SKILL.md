@@ -315,12 +315,15 @@ Related: eggs never sleep — they go "dormant" (see replayOfflineGap's egg
 branch in pet-core decay.ts) and cannot die; 0 warmth just stalls hatch
 progress.
 
-## throwArc lives in throwPhysics.ts
+## throwArc lives in throwPhysics.ts; Target Toss uses curlPhysics.ts
 
 The ballistic parabola was extracted verbatim from GameView.tsx to
-`apps/desktop/src/game/throwPhysics.ts` so the Target Toss minigame replays
-the exact same flight. Feed/ball import it from there — don't re-inline or
-fork the formula.
+`apps/desktop/src/game/throwPhysics.ts`. Feed/ball import it from there —
+don't re-inline or fork the formula. The Target Toss minigame does NOT use
+it (as of Jul 2026): it slides a puck in a straight line with exponential
+friction decay via `apps/desktop/src/game/curlPhysics.ts` (`slidePuck`/
+`slideDistance`/`slideDuration`) — a deliberate separate mechanic, not a
+fork, chosen so the drag-aim preview line IS the travel line.
 
 ## Quick-reference gotcha list
 

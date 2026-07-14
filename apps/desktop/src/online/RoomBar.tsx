@@ -5,11 +5,9 @@
 // while the chat box is expanded — the same bounded-interaction pattern as
 // wash-scrub and the settings inputs.
 import { useEffect, useRef, useState } from "react";
-import { BATTLE_ROUND_MS, BATTLE_VERDICT_MS, type RoomApi, type RpsMove } from "./useRoom";
+import { BATTLE_ROUND_MS, BATTLE_VERDICT_MS, type RoomApi } from "./useRoom";
 
 const EMOTES = ["👋", "❤️", "😂", "😮", "😢", "🎉"];
-
-const RPS_EMOJI: Record<RpsMove, string> = { rock: "✊", paper: "✋", scissors: "✌️" };
 
 const barBtn: React.CSSProperties = {
   cursor: "pointer",
@@ -164,66 +162,8 @@ export function RoomBar({ room }: { room: RoomApi }) {
         </div>
       )}
 
-      {/* Minigame: move picker / waiting / result */}
-      {room.minigame && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "8px 14px",
-            borderRadius: 12,
-            background: "rgba(23,37,84,0.95)",
-            color: "#fff",
-            fontSize: 13,
-            fontWeight: 700,
-            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
-          }}
-        >
-          {room.minigame.outcome ? (
-            <>
-              <span>
-                {RPS_EMOJI[room.minigame.myMove!]} vs {RPS_EMOJI[room.minigame.theirMove!]} —{" "}
-                {room.minigame.outcome === "win"
-                  ? `🏆 you beat ${room.minigame.opponentName}!`
-                  : room.minigame.outcome === "tie"
-                    ? "🤝 it's a tie!"
-                    : `💔 ${room.minigame.opponentName} wins!`}
-              </span>
-              <button style={barBtn} onClick={room.clearMinigame}>
-                ✕
-              </button>
-            </>
-          ) : room.minigame.myMove ? (
-            <>
-              <span>
-                {RPS_EMOJI[room.minigame.myMove]} locked in — waiting for {room.minigame.opponentName}…
-              </span>
-              {/* Escape hatch: the opponent may have left mid-game. */}
-              <button title="Abandon game" style={barBtn} onClick={room.clearMinigame}>
-                ✕
-              </button>
-            </>
-          ) : (
-            <>
-              <span>vs {room.minigame.opponentName} — pick:</span>
-              {(["rock", "paper", "scissors"] as const).map((m) => (
-                <button
-                  key={m}
-                  title={m}
-                  style={{ ...barBtn, fontSize: 18, padding: "4px 10px" }}
-                  onClick={() => room.sendRpsMove(m)}
-                >
-                  {RPS_EMOJI[m]}
-                </button>
-              ))}
-              <button title="Abandon game" style={barBtn} onClick={room.clearMinigame}>
-                ✕
-              </button>
-            </>
-          )}
-        </div>
-      )}
+      {/* The RPS pick/reveal UI lives in the full-screen RockPaperScissors
+          modal now — RoomBar only shows the pre-game invite banners above. */}
 
       {/* Lobby feedback toast (turned away / host left) */}
       {room.lobbyNotice && (

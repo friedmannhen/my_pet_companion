@@ -1,14 +1,15 @@
 // Target Toss arena (room minigame #1). Right half: concentric-ring target;
-// left half: the active thrower's launcher with drag-pullback slingshot
-// aiming (same manual-velocity technique as the proven feed/ball gestures).
-// The thrower computes its landing locally and broadcasts the arc params;
-// EVERY client (thrower included) replays the identical throwArc() flight,
-// so there's no cross-client physics simulation to desync. Placeholder
-// CSS/motion shapes only — no art assets yet.
+// left half: the active thrower's launcher. Aiming is a drag-pullback
+// slingshot, and the puck slides in a STRAIGHT line with ice-like friction
+// (curlPhysics.ts) — the dashed aim preview ends exactly where the puck
+// will stop, by construction. An over-powered pull whose stop point falls
+// off screen is a MISS (distance null, scores like a skip) but still plays
+// its slide-off visual. The thrower computes the stop point locally and
+// broadcasts it; every client replays the identical slidePuck().
 import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, useMotionValue } from "framer-motion";
 import { computeStandings, currentTossTurn, TARGET_TOSS_ROUNDS } from "@pet/core";
-import { throwArc } from "../throwPhysics";
+import { slidePuck, slideDistance, slideDuration } from "../curlPhysics";
 import { TOSS_TURN_TIMEOUT_MS, type RoomApi } from "../../online/useRoom";
 
 // Arena geometry (fractions of the window, so every screen sees the same
@@ -19,8 +20,11 @@ const LAUNCH_NX = 0.2;
 const LAUNCH_NY = 0.65;
 /** Target outer-ring radius as a fraction of min(viewport w, h). */
 const TARGET_R_FRAC = 0.18;
-/** Landing offset = pull vector × this (slingshot power). */
-const PULL_POWER = 3.2;
+/** Launch speed (px/s) per pixel of pull — high enough that a hard pull
+ *  can overshoot the whole screen (that's the miss risk). */
+const V0_PER_PULL_PX = 11;
+/** Pre-turn "get ready" pause before aiming unlocks. */
+const TURN_READY_MS = 3_000;
 
 const RING_COLORS = ["rgba(248,113,113,0.85)", "rgba(255,255,255,0.9)", "rgba(248,113,113,0.85)", "rgba(255,255,255,0.9)", "rgba(239,68,68,0.95)"];
 
@@ -49,12 +53,34 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
   }, []);
   const remainingS = Math.max(0, Math.ceil((TOSS_TURN_TIMEOUT_MS - (Date.now() - game.turnStartedAt)) / 1000));
 
+  // Per-turn "get ready" pause: every turn change shows a big banner and
+  // blocks aiming for 3s so nobody gets ambushed by their own turn.
+  const turnKey = turn ? `${turn.phase}:${turn.round}:${turn.userId}` : "over";
+  const readyUntilRef = useRef(0);
+  const lastTurnKeyRef = useRef<string | null>(null);
+  if (lastTurnKeyRef.current !== turnKey) {
+    lastTurnKeyRef.current = turnKey;
+    if (turn) readyUntilRef.current = Date.now() + TURN_READY_MS;
+  }
+  const gettingReady = turn !== null && Date.now() < readyUntilRef.current;
+  const readyRemainingS = Math.max(1, Math.ceil((readyUntilRef.current - Date.now()) / 1000));
+
   // ── Aiming (drag-pullback) — ref-mirrored so handlers read synchronously ──
   const [aiming, setAiming] = useState(false);
   const [pull, setPull] = useState({ dx: 0, dy: 0 });
   const aimRef = useRef<{ startX: number; startY: number; dx: number; dy: number; active: boolean }>({
     startX: 0, startY: 0, dx: 0, dy: 0, active: false,
   });
+
+  /** Straight-line slide: where a given pull's puck stops (may be off screen). */
+  const stopPointFor = useCallback((dx: number, dy: number) => {
+    const from = launcherPos();
+    const pullLen = Math.hypot(dx, dy);
+    if (pullLen < 1) return { x: from.x, y: from.y, v0: 0 };
+    const v0 = pullLen * V0_PER_PULL_PX;
+    const dist = slideDistance(v0);
+    return { x: from.x - (dx / pullLen) * dist, y: from.y - (dy / pullLen) * dist, v0 };
+  }, []);
 
   const releaseAim = useCallback(() => {
     const aim = aimRef.current;
@@ -64,26 +90,24 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
     setPull({ dx: 0, dy: 0 });
     const pullLen = Math.hypot(aim.dx, aim.dy);
     if (pullLen < 12) return; // a stray click, not a real pull — no throw
-    const from = launcherPos();
-    // Slingshot: launch opposite the pull.
-    const toX = Math.max(20, Math.min(window.innerWidth - 20, from.x - aim.dx * PULL_POWER));
-    const toY = Math.max(20, Math.min(window.innerHeight - 40, from.y - aim.dy * PULL_POWER));
+    const { x: toX, y: toY, v0 } = stopPointFor(aim.dx, aim.dy);
+    // Off-screen stop point = a MISS (scores like a skip), but the slide
+    // visual still plays so everyone sees the puck sail away.
+    const inBounds = toX >= 0 && toX <= window.innerWidth && toY >= 0 && toY <= window.innerHeight;
     const c = targetCenter();
     const r = targetRadius();
-    const distance = Math.round((Math.hypot(toX - c.x, toY - c.y) / r) * 1000) / 10; // % of target radius, 1 decimal
-    const flightLen = Math.hypot(toX - from.x, toY - from.y);
+    const distance = inBounds ? Math.round((Math.hypot(toX - c.x, toY - c.y) / r) * 1000) / 10 : null;
     room.submitToss({
       toNX: toX / window.innerWidth,
       toNY: toY / window.innerHeight,
-      arcHeight: Math.max(80, Math.min(280, 60 + pullLen * 0.9)),
-      duration: 0.55 + Math.min(0.5, flightLen / 1400),
-      spinDegrees: 280 + pullLen * 1.5,
+      duration: slideDuration(v0),
+      spinDegrees: (aim.dx > 0 ? -1 : 1) * (90 + pullLen * 0.6),
       distance,
     });
-  }, [room]);
+  }, [room, stopPointFor]);
 
   useEffect(() => {
-    if (!myTurn || over) return;
+    if (!myTurn || over || gettingReady) return;
     const onMove = (e: MouseEvent) => {
       const aim = aimRef.current;
       if (!aim.active) return;
@@ -98,15 +122,27 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [myTurn, over, releaseAim]);
+  }, [myTurn, over, gettingReady, releaseAim]);
 
-  // ── Flight replay: every client animates lastFx with the shared physics ──
+  // ── Slide replay + deferred markers ───────────────────────────────────────
+  // Markers are shown only AFTER the puck visually stops (game.markers
+  // updates the instant the event applies — too early), so this component
+  // keeps its own visibleMarkers, appended in the slide's completion
+  // callback and wiped whenever the round (markersKey) changes.
   const ballX = useMotionValue(-100);
   const ballY = useMotionValue(-100);
   const ballRotate = useMotionValue(0);
-  const ballScaleX = useMotionValue(1);
-  const ballScaleY = useMotionValue(1);
   const [ballVisible, setBallVisible] = useState(false);
+  const [visibleMarkers, setVisibleMarkers] = useState<
+    { userId: string; nx: number; ny: number; distance: number }[]
+  >([]);
+  const markersKeyRef = useRef(game.markersKey);
+  if (markersKeyRef.current !== game.markersKey) {
+    markersKeyRef.current = game.markersKey;
+    // New round — old markers leave with it. (Render-time reset keeps the
+    // wipe in the same commit as the round change.)
+    if (visibleMarkers.length > 0) setVisibleMarkers([]);
+  }
   const playedFxRef = useRef<string | null>(null);
   useEffect(() => {
     const fx = game.lastFx;
@@ -117,19 +153,21 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
     ballY.set(from.y);
     ballRotate.set(0);
     setBallVisible(true);
-    void throwArc({
+    void slidePuck({
       x: ballX,
       y: ballY,
       rotate: ballRotate,
-      scaleX: ballScaleX,
-      scaleY: ballScaleY,
       toX: fx.toNX * window.innerWidth,
       toY: fx.toNY * window.innerHeight,
-      arcHeight: fx.arcHeight,
       duration: fx.duration,
       spinDegrees: fx.spinDegrees,
-    }).then(() => setBallVisible(false));
-  }, [game.lastFx, ballX, ballY, ballRotate, ballScaleX, ballScaleY]);
+    }).then(() => {
+      setBallVisible(false);
+      if (fx.distance !== null) {
+        setVisibleMarkers((prev) => [...prev, { userId: fx.userId, nx: fx.toNX, ny: fx.toNY, distance: fx.distance! }]);
+      }
+    });
+  }, [game.lastFx, ballX, ballY, ballRotate]);
 
   const c = targetCenter();
   const r = targetRadius();
@@ -179,8 +217,9 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
         />
       ))}
 
-      {/* Landing markers (current round only), hover shows the thrower */}
-      {game.markers.map((m, i) => (
+      {/* Landing markers (current round only, shown once the puck stops),
+          hover shows the thrower */}
+      {visibleMarkers.map((m, i) => (
         <div
           key={`${m.userId}-${i}`}
           title={`${nameOf(m.userId)} — ${m.distance} from center`}
@@ -214,7 +253,7 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
           justifyContent: "center",
         }}
       >
-        {myTurn && !over && (
+        {myTurn && !over && !gettingReady && (
           <div
             onMouseDown={(e) => {
               if (e.button !== 0) return;
@@ -223,35 +262,43 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
             }}
             style={{ fontSize: 34, cursor: "grab", userSelect: "none", transform: `translate(${pull.dx * 0.35}px, ${pull.dy * 0.35}px)` }}
           >
-            ⚾
+            🥌
           </div>
         )}
       </div>
 
-      {/* Rubber-band aim line + projected direction hint */}
-      {aiming && (
-        <svg style={{ position: "absolute", inset: 0, pointerEvents: "none" }} width="100%" height="100%">
-          <line
-            x1={lp.x}
-            y1={lp.y}
-            x2={lp.x + pull.dx * 0.35}
-            y2={lp.y + pull.dy * 0.35}
-            stroke="rgba(253,224,71,0.9)"
-            strokeWidth={3}
-          />
-          <line
-            x1={lp.x}
-            y1={lp.y}
-            x2={lp.x - pull.dx * 1.2}
-            y2={lp.y - pull.dy * 1.2}
-            stroke="rgba(255,255,255,0.35)"
-            strokeWidth={2}
-            strokeDasharray="6 6"
-          />
-        </svg>
-      )}
+      {/* Rubber-band aim line + the puck's EXACT projected stop point
+          (straight-line physics — the preview is the travel line). */}
+      {aiming &&
+        (() => {
+          const stop = stopPointFor(pull.dx, pull.dy);
+          const willMiss =
+            stop.x < 0 || stop.x > window.innerWidth || stop.y < 0 || stop.y > window.innerHeight;
+          return (
+            <svg style={{ position: "absolute", inset: 0, pointerEvents: "none" }} width="100%" height="100%">
+              <line
+                x1={lp.x}
+                y1={lp.y}
+                x2={lp.x + pull.dx * 0.35}
+                y2={lp.y + pull.dy * 0.35}
+                stroke="rgba(253,224,71,0.9)"
+                strokeWidth={3}
+              />
+              <line
+                x1={lp.x}
+                y1={lp.y}
+                x2={stop.x}
+                y2={stop.y}
+                stroke={willMiss ? "rgba(248,113,113,0.7)" : "rgba(255,255,255,0.4)"}
+                strokeWidth={2}
+                strokeDasharray="6 6"
+              />
+              {!willMiss && <circle cx={stop.x} cy={stop.y} r={7} fill="none" stroke="rgba(255,255,255,0.55)" strokeWidth={2} />}
+            </svg>
+          );
+        })()}
 
-      {/* The flying ball (replayed identically on every client) */}
+      {/* The sliding puck (replayed identically on every client) */}
       {ballVisible && (
         <motion.div
           style={{
@@ -261,14 +308,12 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
             x: ballX,
             y: ballY,
             rotate: ballRotate,
-            scaleX: ballScaleX,
-            scaleY: ballScaleY,
             fontSize: 34,
             pointerEvents: "none",
             zIndex: 5,
           }}
         >
-          ⚾
+          🥌
         </motion.div>
       )}
 
@@ -290,22 +335,56 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
           boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
         }}
       >
-        <span style={{ fontWeight: 800 }}>🎯 Target Toss</span>
+        <span style={{ fontWeight: 800, fontSize: 18 }}>🎯 Target Toss</span>
         {game.core.order.map((id) => (
-          <span key={id} style={{ opacity: turn?.userId === id ? 1 : 0.6, fontWeight: turn?.userId === id ? 800 : 500 }}>
+          <span
+            key={id}
+            style={{ fontSize: 18, opacity: turn?.userId === id ? 1 : 0.6, fontWeight: turn?.userId === id ? 800 : 500 }}
+          >
             {id === userId ? "You" : nameOf(id)}: {standings[id] ?? 0}🏆
           </span>
         ))}
         {!over && turn && (
-          <span style={{ color: "#fde68a", fontWeight: 700 }}>
+          <span style={{ color: "#fde68a", fontWeight: 800, fontSize: 18 }}>
             {turn.phase === "sudden"
               ? `⚡ Sudden death ${turn.round} — ${turnName}`
               : `Round ${turn.round}/${TARGET_TOSS_ROUNDS} — ${turnName}`}
             {" · "}
-            {myTurn ? `⏳ ${remainingS}s` : `aiming… ${remainingS}s`}
+            <span style={{ fontSize: 22, fontWeight: 900, color: remainingS <= 5 ? "#f87171" : "#fde68a" }}>
+              ⏳{remainingS}s
+            </span>
           </span>
         )}
       </div>
+
+      {/* Per-turn "get ready" banner — shown to EVERYONE the moment the
+          turn changes; the active player's aiming unlocks when it clears. */}
+      {gettingReady && turn && (
+        <motion.div
+          key={turnKey}
+          initial={{ scale: 0.6, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ type: "spring", stiffness: 220, damping: 16 }}
+          style={{
+            position: "absolute",
+            top: "34%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            padding: "16px 34px",
+            borderRadius: 16,
+            background: "rgba(20,20,26,0.94)",
+            color: myTurn ? "#34d399" : "#fde68a",
+            fontSize: 30,
+            fontWeight: 900,
+            textAlign: "center",
+            boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+            pointerEvents: "none",
+          }}
+        >
+          {myTurn ? "🥌 Your turn!" : `${turnName}'s turn`}
+          <div style={{ fontSize: 40, marginTop: 4 }}>{readyRemainingS}</div>
+        </motion.div>
+      )}
 
       {/* Result toast for the latest throw */}
       {lastFx && !over && (
@@ -319,21 +398,23 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
             top: 62,
             left: "50%",
             transform: "translateX(-50%)",
-            padding: "6px 14px",
+            padding: "8px 16px",
             borderRadius: 10,
             background: "rgba(30,20,60,0.95)",
             color: "#fff",
-            fontSize: 12,
+            fontSize: 16,
             fontWeight: 700,
             pointerEvents: "none",
           }}
         >
-          🎯 {lastFx.userId === userId ? "You" : nameOf(lastFx.userId)} landed {lastFx.distance} from center!
+          {lastFx.distance === null
+            ? `💨 ${lastFx.userId === userId ? "Your" : `${nameOf(lastFx.userId)}'s`} puck sailed off the ice — miss!`
+            : `🎯 ${lastFx.userId === userId ? "You" : nameOf(lastFx.userId)} landed ${lastFx.distance} from center!`}
         </motion.div>
       )}
 
       {/* Aiming hint for the active player */}
-      {myTurn && !over && !aiming && (
+      {myTurn && !over && !aiming && !gettingReady && (
         <div
           style={{
             position: "absolute",
@@ -348,7 +429,7 @@ export function TargetToss({ room, userId }: { room: RoomApi; userId: string }) 
             pointerEvents: "none",
           }}
         >
-          Grab the ball, pull back, release to launch!
+          Grab the puck, pull back, release to slide it — too hard and it flies off the ice!
         </div>
       )}
 

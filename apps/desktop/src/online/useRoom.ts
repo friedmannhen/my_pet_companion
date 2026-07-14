@@ -80,7 +80,17 @@ export interface ActiveMinigame {
   theirMove: RpsMove | null;
   /** Set once both moves are in — "win"/"lose"/"tie" from MY perspective. */
   outcome: "win" | "lose" | "tie" | null;
+  /** Game start on this client — drives the 5s pick countdown. */
+  startedAt: number;
+  /** Set the instant outcome resolves — drives the 3s reveal countdown. */
+  resolvedAt: number | null;
+  /** Non-null = game cancelled (someone didn't pick in time); the message. */
+  cancelled: string | null;
 }
+
+/** Pick window before an RPS game cancels, and the reveal-drumroll length. */
+export const RPS_PICK_TIMEOUT_MS = 5_000;
+export const RPS_REVEAL_MS = 3_000;
 
 export function rpsOutcome(mine: RpsMove, theirs: RpsMove): "win" | "lose" | "tie" {
   if (mine === theirs) return "tie";
@@ -118,16 +128,17 @@ export interface MinigameLobby {
   ready: string[];
 }
 
-/** Arc replay parameters, normalized to screen fractions (like `pos`). */
+/** Slide replay parameters, normalized to screen fractions (like `pos`).
+ *  distance null = a miss (puck slid off screen) — still a real throw
+ *  event with a full visual, it just scores like a skip. */
 export interface TossThrowFx {
   id: string;
   userId: string;
   toNX: number;
   toNY: number;
-  arcHeight: number;
   duration: number;
   spinDegrees: number;
-  distance: number;
+  distance: number | null;
 }
 
 export interface TargetTossState {
@@ -314,7 +325,11 @@ export function useRoom({
         const evKey = `${turn.phase}:${turn.round}`;
         const core = applyTossEvent(prev.core, { userId: ev.userId, distance: ev.distance });
         const keep = prev.markersKey === evKey ? prev.markers : [];
-        const markers = fx ? [...keep, { userId: ev.userId, nx: fx.toNX, ny: fx.toNY, distance: fx.distance }] : keep;
+        // Misses (distance null — puck slid off screen) leave no marker.
+        const markers =
+          fx && fx.distance !== null
+            ? [...keep, { userId: ev.userId, nx: fx.toNX, ny: fx.toNY, distance: fx.distance }]
+            : keep;
         return {
           ...prev,
           core,
@@ -437,10 +452,9 @@ export function useRoom({
             target?: string;
             toNX?: number;
             toNY?: number;
-            arcHeight?: number;
             duration?: number;
             spinDegrees?: number;
-            distance?: number;
+            distance?: number | null;
             id?: string;
           };
           if (!userId || p.from === userId) return;
@@ -539,17 +553,19 @@ export function useRoom({
           }
 
           if (p.kind === "throw") {
+            // distance: null is a MISS, a meaningful value — never `?? 0` it
+            // (that would score an off-screen puck as a literal bullseye).
+            const distance = typeof p.distance === "number" ? p.distance : null;
             applyToss(
-              { userId: p.from, distance: p.distance ?? null, seq: p.seq ?? -1 },
+              { userId: p.from, distance, seq: p.seq ?? -1 },
               {
                 id: p.id ?? `${p.from}-${Date.now()}`,
                 userId: p.from,
                 toNX: p.toNX ?? 0.5,
                 toNY: p.toNY ?? 0.5,
-                arcHeight: p.arcHeight ?? 120,
                 duration: p.duration ?? 0.8,
                 spinDegrees: p.spinDegrees ?? 360,
-                distance: p.distance ?? 0,
+                distance,
               },
             );
             return;
@@ -582,14 +598,25 @@ export function useRoom({
             setIncomingGameInvite({ from: p.from, fromName: p.fromName, at: Date.now() });
           } else if (p.kind === "accept") {
             setOutgoingGameInviteTo(null);
-            setMinigame({ opponentId: p.from, opponentName: p.fromName, myMove: null, theirMove: null, outcome: null });
+            setMinigame({
+              opponentId: p.from,
+              opponentName: p.fromName,
+              myMove: null,
+              theirMove: null,
+              outcome: null,
+              startedAt: Date.now(),
+              resolvedAt: null,
+              cancelled: null,
+            });
           } else if (p.kind === "decline") {
             setOutgoingGameInviteTo(null);
           } else if (p.kind === "move" && p.move) {
             setMinigame((prev) => {
-              if (!prev || prev.opponentId !== p.from || prev.outcome) return prev;
+              if (!prev || prev.opponentId !== p.from || prev.outcome || prev.cancelled) return prev;
               const next = { ...prev, theirMove: p.move! };
-              return next.myMove ? { ...next, outcome: rpsOutcome(next.myMove, next.theirMove!) } : next;
+              return next.myMove
+                ? { ...next, outcome: rpsOutcome(next.myMove, next.theirMove!), resolvedAt: Date.now() }
+                : next;
             });
           }
         });
@@ -793,7 +820,16 @@ export function useRoom({
       event: "minigame",
       payload: { kind: "accept", from: userId, fromName: nameRef.current, to: inv.from },
     });
-    setMinigame({ opponentId: inv.from, opponentName: inv.fromName, myMove: null, theirMove: null, outcome: null });
+    setMinigame({
+      opponentId: inv.from,
+      opponentName: inv.fromName,
+      myMove: null,
+      theirMove: null,
+      outcome: null,
+      startedAt: Date.now(),
+      resolvedAt: null,
+      cancelled: null,
+    });
     setIncomingGameInvite(null);
   }, [incomingGameInvite, userId]);
 
@@ -812,9 +848,11 @@ export function useRoom({
     (move: RpsMove) => {
       if (!channelRef.current || !userId) return;
       setMinigame((prev) => {
-        if (!prev || prev.myMove || prev.outcome) return prev;
+        if (!prev || prev.myMove || prev.outcome || prev.cancelled) return prev;
         const next = { ...prev, myMove: move };
-        return next.theirMove ? { ...next, outcome: rpsOutcome(move, next.theirMove) } : next;
+        return next.theirMove
+          ? { ...next, outcome: rpsOutcome(move, next.theirMove), resolvedAt: Date.now() }
+          : next;
       });
       void channelRef.current.send({
         type: "broadcast",
@@ -967,6 +1005,41 @@ export function useRoom({
       setLobbyNotice("The host left — game lobby closed.");
     }
   }, [members, minigameLobby, userId]);
+
+  // Mid-game participant dwindle: if everyone else has left the room, the
+  // lone remaining player shouldn't sit through rounds of auto-skips —
+  // cancel the game locally (extends the host-departs-before-start rule to
+  // after start).
+  useEffect(() => {
+    if (!tossGame || !userId || tossGame.core.winners.length > 0) return;
+    const present = (id: string) => id === userId || members.some((m) => m.userId === id);
+    const remaining = tossGame.core.order.filter(present).length;
+    if (remaining <= 1) {
+      setTossGame(null);
+      setLobbyNotice("Not enough players left — game cancelled.");
+    }
+  }, [members, tossGame, userId]);
+
+  // RPS pick timeout: if 5s pass without both moves, cancel the game and
+  // name whoever didn't pick. Each client derives this locally — moves are
+  // broadcast the instant they're picked, so both sides' views agree within
+  // normal latency (no cancel broadcast needed).
+  useEffect(() => {
+    if (!minigame || minigame.outcome || minigame.cancelled) return;
+    const id = setTimeout(() => {
+      setMinigame((prev) => {
+        if (!prev || prev.outcome || prev.cancelled) return prev;
+        const who =
+          !prev.myMove && !prev.theirMove
+            ? "Nobody picked in time"
+            : !prev.myMove
+              ? "You didn't pick in time"
+              : `${prev.opponentName} didn't pick in time`;
+        return { ...prev, cancelled: `${who} — game cancelled.` };
+      });
+    }, RPS_PICK_TIMEOUT_MS - (Date.now() - minigame.startedAt));
+    return () => clearTimeout(id);
+  }, [minigame]);
 
   // Both moves in → apply the (already-agreed, both clients computed it from
   // the same two moves) outcome exactly once.

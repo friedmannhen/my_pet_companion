@@ -172,7 +172,16 @@ that needs "am I the host / is it my turn".
 
 - **RPS** (`minigame` broadcast event, 1:1): invite/accept/decline/move
   handshake mirroring the battle pattern; both clients resolve the same two
-  moves locally (`rpsOutcome`). Entry: 🎮 on a remote pet's mini-menu.
+  moves locally (`rpsOutcome`). Entry: 🎮 on a remote pet's mini-menu. The
+  pick/reveal UI is the full-screen `minigames/RockPaperScissors.tsx` modal
+  (RoomBar keeps only the pre-game invite banner). Timing lives in
+  `ActiveMinigame`: `startedAt` drives a 5s pick countdown
+  (`RPS_PICK_TIMEOUT_MS`) — no pick in time cancels the game locally with a
+  message naming who didn't pick (`cancelled`, no broadcast needed);
+  `resolvedAt` drives a 3s reveal drumroll (`RPS_REVEAL_MS`) before the
+  already-known outcome is shown, winner's pet does the `.pet-anim-happy`
+  wiggle. GameView delays the celebratory pulse by `RPS_REVEAL_MS` to avoid
+  spoiling the reveal.
 - **Target Toss** (`mg` broadcast event with a `kind` discriminator —
   functionally the plan's mg-invite/join/ready/roster/start/throw/skip/
   cancel): room-wide lobby, host-authoritative pre-start ONLY. The host
@@ -193,16 +202,54 @@ that needs "am I the host / is it my turn".
   different orders on different clients (both carry the same seq; first
   arrival wins per client) — needs presence flap + exact timing; noted, not
   yet fixed.
-- **Physics sync**: the thrower computes its landing locally and broadcasts
-  arc params (normalized 0..1 coords); every client (thrower included)
-  replays the identical `throwArc()` from `apps/desktop/src/game/
-  throwPhysics.ts` (extracted from GameView — feed/ball use the same
-  export). Distances are normalized to the target radius so different
-  monitor sizes compete fairly.
+- **Physics sync (curling, Jul 2026)**: the puck slides in a STRAIGHT line
+  with exponential friction (`apps/desktop/src/game/curlPhysics.ts`,
+  `slidePuck` — NOT throwPhysics' parabola), so the drag-aim preview ends
+  exactly at the real stop point. The thrower computes the stop point
+  locally and broadcasts it (normalized 0..1 coords); every client replays
+  the identical slide. An over-pulled stop point outside the viewport is a
+  **MISS**: `TossThrowFx.distance` is `number | null`, null = miss (scores
+  like a skip via the existing distance-null path in pet-core), the slide
+  visual still plays, no landing marker. **Never `?? 0` the received
+  distance** — that coerces a miss into a bullseye; the handler uses
+  `typeof p.distance === "number" ? p.distance : null`. Distances are
+  normalized to the target radius so monitor sizes compete fairly.
+  Landing markers render from TargetToss.tsx's local `visibleMarkers`
+  (appended when the slide animation completes), not `game.markers`
+  (which updates the instant the event applies — scoring truth only).
+  Each turn starts with a 3s all-players "get ready" banner
+  (`TURN_READY_MS`) that blocks aiming; if participants still present
+  drop to ≤1 mid-game, the game cancels locally with a lobbyNotice.
 - The arena (`apps/desktop/src/game/minigames/TargetToss.tsx`) is a
   full-screen `data-interactive` overlay at zIndex 22000 (RoomBar's 23000
   stays above it); GameView mounts it when `room.tossGame` is set and owns
   the game-over history/RPC recording (`tossRecordedRef` one-shot guard).
+
+## Personal notifications (`useNotifications.ts`, Jul 2026)
+
+Realtime-only (deliberately NO DB persistence — a notification is missed if
+the recipient's app is closed). Each signed-in client subscribes to its own
+persistent `user-inbox:<userId>` channel; `sendTo(targetUserId, payload)`
+opens a TRANSIENT channel on the TARGET's topic, sends once SUBSCRIBED,
+then removes it (~1.5s later). Topics differ per user so the sender's
+transient channel can never collide with its own inbox subscription (topic
+dedupe footgun). Kinds: `friend_request`, `friend_accepted` (sent from
+SideDock's Add/Accept buttons), `room_invite` (sent from the 🌐 Invite
+button on a friend row, only visible while in a room; payload carries
+groupId/groupName/inviteCode). UI: a clickable "the pet tells you" bubble
+above the local pet (6s TTL, opens the dock at friends/groups), plus a
+persistent Join/Dismiss banner for room invites mounted NEXT TO RoomBar in
+GameView (RoomBar renders nothing outside a room, and invites matter
+precisely then). Join uses the already-known group when the recipient is a
+member, else `groupsApi.join(inviteCode)` → `room.join`.
+
+Related UX invariants: typing/pasting a full 6-char invite code in "Join
+with a code" auto-joins AND auto-enters the room (`submitJoinCode`,
+ref-guarded against double-submit — all three submit paths funnel through
+it); every "My groups" card is a `GroupRow` component with its own
+always-on `useGroupPresenceCount` (one presence channel per listed group
+while the groups tab is open) showing inline 🟢-per-player badges (cap 5,
+then +N).
 
 ## Debugging checklist for "X isn't showing up for the other player"
 

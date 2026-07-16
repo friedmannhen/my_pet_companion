@@ -38,7 +38,7 @@ import { useConsumables } from "./useConsumables";
 import { useGamePrefs } from "./useGamePrefs";
 import { useGroups } from "./useGroups";
 import { useRoom, RPS_REVEAL_MS } from "../online/useRoom";
-import { useNotifications } from "../online/useNotifications";
+import { useNotifications, ROOM_INVITE_TTL_MS } from "../online/useNotifications";
 import { RemotePets } from "../online/RemotePets";
 import { RoomBar } from "../online/RoomBar";
 import { TargetToss } from "./minigames/TargetToss";
@@ -536,9 +536,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   // ── Online: groups + realtime room ──────────────────────────────────────
   const groupsApi = useGroups(auth.userId);
+  const myName = auth.displayName || auth.email?.split("@")[0] || "Player";
   // Personal realtime inbox (friend requests/accepts, room invites) — no DB
   // persistence, works with or without an active room.
-  const notifications = useNotifications(auth.userId);
+  const notifications = useNotifications(auth.userId, myName);
   // Lets notification clicks open the dock at a specific view.
   const [dockViewRequest, setDockViewRequest] = useState<{ view: "friends" | "groups"; n: number } | null>(null);
   const openDockAt = useCallback((view: "friends" | "groups") => {
@@ -595,13 +596,87 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   );
   const room = useRoom({
     userId: auth.userId,
-    displayName: auth.displayName || auth.email?.split("@")[0] || "Player",
+    displayName: myName,
     save,
     isEgg: game.isEgg,
     onSocialPet,
     onBattleResolved,
     onMinigameResolved,
   });
+
+  // Room-invite spam guard: one outstanding invite per friend at a time,
+  // cleared when they join, when they explicitly decline (notifications
+  // .lastDecline), or after 60s either way (backstop for a lost decline).
+  const [pendingRoomInvites, setPendingRoomInvites] = useState<Record<string, number>>({});
+  const inviteFriendToRoom = useCallback(
+    (friendId: string, group: { id: string; name: string; inviteCode: string | null }) => {
+      setPendingRoomInvites((prev) => {
+        if (prev[friendId] && Date.now() - prev[friendId] < ROOM_INVITE_TTL_MS) return prev; // already pending
+        return { ...prev, [friendId]: Date.now() };
+      });
+      notifications.sendTo(friendId, {
+        kind: "room_invite",
+        fromName: myName,
+        groupId: group.id,
+        groupName: group.name,
+        inviteCode: group.inviteCode ?? undefined,
+      });
+    },
+    [notifications, myName],
+  );
+  // 60s backstop — most invites clear sooner via the decline/join effects below.
+  useEffect(() => {
+    if (Object.keys(pendingRoomInvites).length === 0) return;
+    const id = setInterval(() => {
+      setPendingRoomInvites((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const fid of Object.keys(next)) {
+          if (Date.now() - next[fid]! > ROOM_INVITE_TTL_MS) {
+            delete next[fid];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 2000);
+    return () => clearInterval(id);
+  }, [pendingRoomInvites]);
+  // The recipient declined (manually or their own 60s timeout) — clear
+  // instantly instead of waiting out our own timer.
+  useEffect(() => {
+    const d = notifications.lastDecline;
+    if (!d) return;
+    setPendingRoomInvites((prev) => {
+      if (!(d.fromId in prev)) return prev;
+      const next = { ...prev };
+      delete next[d.fromId];
+      return next;
+    });
+  }, [notifications.lastDecline]);
+  // The invited friend showed up in my room's presence — they accepted.
+  useEffect(() => {
+    if (!room.activeGroup) return;
+    const present = new Set(room.members.map((m) => m.userId));
+    setPendingRoomInvites((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const fid of Object.keys(next)) {
+        if (present.has(fid)) {
+          delete next[fid];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [room.activeGroup, room.members]);
+
+  const roomMemberIds = room.members.map((m) => m.userId);
+
+  // While a minigame overlay is open, freeze the local pet (no drag, no
+  // wander, no radial menu) — the full-screen overlay already visually
+  // covers/intercepts clicks, this is belt-and-suspenders.
+  const inMinigame = !!room.tossGame || !!room.minigame;
 
   // Target Toss game over → each participant logs its OWN result exactly
   // once: a history entry (no progression rewards, same rule as RPS) plus a
@@ -1692,6 +1767,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         notifications={notifications}
         viewRequest={dockViewRequest}
         activeRoomGroupId={room.activeGroup?.id ?? null}
+        roomMemberIds={roomMemberIds}
+        pendingRoomInvites={pendingRoomInvites}
+        onInviteFriend={inviteFriendToRoom}
         canGoOnline={!game.isEgg && save.isAlive}
         onEnterRoom={(g) => {
           room.join(g);
@@ -1777,7 +1855,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           </button>
         </div>
       )}
-      {room.tossGame && auth.userId && <TargetToss room={room} userId={auth.userId} />}
+      {room.tossGame && auth.userId && <TargetToss room={room} userId={auth.userId} mySave={save} />}
       {room.minigame && auth.userId && <RockPaperScissors room={room} userId={auth.userId} mySave={save} />}
 
       {/* Food — always mounted, positioned purely via foodX/foodY motion
@@ -2108,7 +2186,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           // container's own z-index, not one set on a descendant of it.
           zIndex: eggPhase === "burst" ? 945 : undefined,
         }}
-        {...(save.isAlive && !petBusy ? petDragHandlers : {})}
+        {...(save.isAlive && !petBusy && !inMinigame ? petDragHandlers : {})}
       >
         {/* Notification bubble — the pet "tells" you about friend requests /
             accepts / room invites. Same look as the chat bubble but clickable
@@ -2228,7 +2306,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           // the shell bursts, just elevated above the shell (zIndex) so
           // it's visible sitting in it.
           onClick={
-            hatchCutsceneActive || petBusy
+            hatchCutsceneActive || petBusy || inMinigame
               ? undefined
               : game.isEgg && !game.canHatch
                 ? undefined

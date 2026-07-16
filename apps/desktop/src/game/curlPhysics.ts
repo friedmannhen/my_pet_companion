@@ -20,6 +20,17 @@ export function slideDistance(v0: number, k: number = CURL_FRICTION_K): number {
   return (v0 - V_MIN) / k;
 }
 
+/**
+ * Inverse of slideDistance: the launch speed that makes the puck travel
+ * exactly `dist` px before stopping. Lets a caller pick the TRAVEL
+ * DISTANCE directly (e.g. from a screen-size-normalized pull fraction)
+ * and still get a physically-consistent v0 for slideDuration/animation.
+ */
+export function velocityForDistance(dist: number, k: number = CURL_FRICTION_K): number {
+  if (dist <= 0) return 0;
+  return dist * k + V_MIN;
+}
+
 /** Time (s) until the puck decays to V_MIN and visually stops. */
 export function slideDuration(v0: number, k: number = CURL_FRICTION_K): number {
   if (v0 <= V_MIN) return 0;

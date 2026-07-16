@@ -495,6 +495,11 @@ export interface SideDockProps {
   viewRequest: { view: "friends" | "groups"; n: number } | null;
   /** Group id of the room we're currently in (null = offline). */
   activeRoomGroupId: string | null;
+  /** userIds currently present in my active room (for "already in your room"). */
+  roomMemberIds: string[];
+  /** friendId -> sentAt for outstanding room invites (spam-guard + UI state). */
+  pendingRoomInvites: Record<string, number>;
+  onInviteFriend: (friendId: string, group: { id: string; name: string; inviteCode: string | null }) => void;
   /** False while the pet is still an egg — online play is locked. */
   canGoOnline: boolean;
   onEnterRoom: (group: GroupInfo) => void;
@@ -538,6 +543,9 @@ export function SideDock({
   notifications,
   viewRequest,
   activeRoomGroupId,
+  roomMemberIds,
+  pendingRoomInvites,
+  onInviteFriend,
   canGoOnline,
   onEnterRoom,
   onLeaveRoom,
@@ -1438,24 +1446,34 @@ export function SideDock({
                 >
                   <span>🤝</span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
-                  {/* Invite to my current room — only shown while actually in one. */}
+                  {/* Invite to my current room — only shown while actually in one.
+                      Three states: already present / invite pending (spam-guarded,
+                      clears on their response or after 60s) / inviteable. */}
                   {activeRoomGroupId &&
                     (() => {
                       const g = groupsApi.groups.find((gr) => gr.id === activeRoomGroupId);
                       if (!g) return null;
+                      if (roomMemberIds.includes(f.userId)) {
+                        return (
+                          <span style={{ fontSize: 10, opacity: 0.7, fontWeight: 700, flexShrink: 0 }}>
+                            ✅ In your room
+                          </span>
+                        );
+                      }
+                      if (f.userId in pendingRoomInvites) {
+                        return (
+                          <span
+                            style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, opacity: 0.6, cursor: "default" }}
+                          >
+                            ⏳ Invited…
+                          </span>
+                        );
+                      }
                       return (
                         <button
                           title={`Invite ${f.name} to ${g.name}`}
                           style={{ ...chipStyle, padding: "4px 8px", fontSize: 11, background: "rgba(52,211,153,0.25)" }}
-                          onClick={() =>
-                            notifications.sendTo(f.userId, {
-                              kind: "room_invite",
-                              fromName: myName,
-                              groupId: g.id,
-                              groupName: g.name,
-                              inviteCode: g.inviteCode ?? undefined,
-                            })
-                          }
+                          onClick={() => onInviteFriend(f.userId, g)}
                         >
                           🌐 Invite
                         </button>

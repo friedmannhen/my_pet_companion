@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTossEvent,
+  arenaLayoutForTurn,
   computeStandings,
+  computeTotalDistances,
   currentTossTurn,
   initTossGame,
   isPhaseComplete,
+  MISS_PENALTY_DISTANCE,
   nextTurn,
   resolveSuddenDeath,
   roundWinners,
   standingsLeaders,
   SUDDEN_DEATH_MAX_PASSES,
+  totalDistanceLeaders,
   type TossEvent,
   type TossGameCore,
 } from "./targetToss";
@@ -150,5 +154,72 @@ describe("applyTossEvent reducer", () => {
     expect(g.winners).toEqual(["a"]);
     const after = applyTossEvent(g, throwEv("b", 0));
     expect(after).toBe(g);
+  });
+
+  it("winner is decided by lowest TOTAL distance, not rounds won (golf scoring)", () => {
+    // b wins 2 of 3 rounds narrowly, but a's one round win is by a landslide —
+    // a should win on total even though b "won" more individual rounds.
+    let g = initTossGame(["a", "b"]);
+    g = play(g, [
+      throwEv("a", 1), throwEv("b", 100), // r1: a wins huge
+      throwEv("a", 50), throwEv("b", 49), // r2: b wins narrow
+      throwEv("a", 50), throwEv("b", 49), // r3: b wins narrow
+    ]);
+    // rounds won: a=1, b=2 — old (wrong) system would give it to b.
+    expect(computeStandings(g.order, g.events)).toEqual({ a: 1, b: 2 });
+    // totals: a=101, b=198 — a has the lower total and wins for real.
+    expect(computeTotalDistances(g.order, g.events)).toEqual({ a: 101, b: 198 });
+    expect(g.winners).toEqual(["a"]);
+  });
+
+  it("a miss charges MISS_PENALTY_DISTANCE, not zero — skipping is never free", () => {
+    let g = initTossGame(["a", "b"]);
+    g = play(g, [
+      throwEv("a", 30), throwEv("b", null), // b skips r1
+      throwEv("a", 30), throwEv("b", 5),    // r2
+      throwEv("a", 30), throwEv("b", 5),    // r3
+    ]);
+    expect(computeTotalDistances(g.order, g.events)).toEqual({
+      a: 90,
+      b: MISS_PENALTY_DISTANCE + 5 + 5,
+    });
+    expect(g.winners).toEqual(["a"]); // a's steady 30s beat b's one skip + two good throws
+  });
+});
+
+describe("totalDistanceLeaders", () => {
+  it("solo leader is the lowest total", () => {
+    expect(totalDistanceLeaders({ a: 40, b: 12, c: 88 })).toEqual(["b"]);
+  });
+  it("ties return every tied leader", () => {
+    expect(totalDistanceLeaders({ a: 40, b: 40, c: 88 })).toEqual(["a", "b"]);
+  });
+});
+
+describe("arenaLayoutForTurn", () => {
+  it("is deterministic for the same (seed, phase, round)", () => {
+    expect(arenaLayoutForTurn(42, "main", 1)).toEqual(arenaLayoutForTurn(42, "main", 1));
+  });
+  it("varies by round and phase (not the same position every time)", () => {
+    const r1 = arenaLayoutForTurn(42, "main", 1);
+    const r2 = arenaLayoutForTurn(42, "main", 2);
+    const sd1 = arenaLayoutForTurn(42, "sudden", 1);
+    expect(r1).not.toEqual(r2);
+    expect(r1).not.toEqual(sd1);
+  });
+  it("stays within the safe middle band regardless of seed", () => {
+    for (const seed of [0, 1, 42, 999999, -7]) {
+      const { targetNY, launchNY } = arenaLayoutForTurn(seed, "main", 1);
+      expect(targetNY).toBeGreaterThanOrEqual(0.3);
+      expect(targetNY).toBeLessThanOrEqual(0.7);
+      expect(launchNY).toBeGreaterThanOrEqual(0.3);
+      expect(launchNY).toBeLessThanOrEqual(0.7);
+    }
+  });
+  it("does not depend on which player is throwing — only (seed, phase, round)", () => {
+    // Nothing in the signature takes a userId; re-affirm by calling twice.
+    const a = arenaLayoutForTurn(7, "main", 2);
+    const b = arenaLayoutForTurn(7, "main", 2);
+    expect(a).toEqual(b);
   });
 });

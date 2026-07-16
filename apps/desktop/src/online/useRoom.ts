@@ -145,6 +145,9 @@ export interface TargetTossState {
   core: TossGameCore;
   names: Record<string, string>;
   hostId: string;
+  /** Shared with every client at game start — feeds arenaLayoutForTurn so
+   *  everyone sees the same random target/launcher position each round. */
+  seed: number;
   /** Reset on every applied event — drives the AFK countdown. */
   turnStartedAt: number;
   /** Latest throw for all clients to replay; markers accumulate per round. */
@@ -448,6 +451,7 @@ export function useRoom({
             ready?: string[];
             order?: string[];
             names?: Record<string, string>;
+            seed?: number;
             seq?: number;
             target?: string;
             toNX?: number;
@@ -544,6 +548,7 @@ export function useRoom({
               core: initTossGame(order),
               names: p.names ?? {},
               hostId: p.from,
+              seed: p.seed ?? 0,
               turnStartedAt: Date.now(),
               lastFx: null,
               markers: [],
@@ -913,11 +918,16 @@ export function useRoom({
     if (!lobby.accepted.every((a) => lobby.ready.includes(a.userId))) return;
     const order = lobby.accepted.map((a) => a.userId);
     const names = Object.fromEntries(lobby.accepted.map((a) => [a.userId, a.name]));
-    sendMg({ kind: "start", from: userId, gameCode: lobby.gameCode, order, names });
+    // One shared seed for the whole game — every client derives each
+    // round's arena layout from it (arenaLayoutForTurn), no per-round
+    // broadcast needed.
+    const seed = Math.floor(Math.random() * 2_147_483_647);
+    sendMg({ kind: "start", from: userId, gameCode: lobby.gameCode, order, names, seed });
     setTossGame({
       core: initTossGame(order),
       names,
       hostId: userId,
+      seed,
       turnStartedAt: Date.now(),
       lastFx: null,
       markers: [],

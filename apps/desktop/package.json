@@ -1,6 +1,6 @@
 {
   "name": "@pet/desktop",
-  "version": "0.1.21",
+  "version": "0.1.23",
   "private": true,
   "license": "UNLICENSED",
   "main": "out/main/main.js",

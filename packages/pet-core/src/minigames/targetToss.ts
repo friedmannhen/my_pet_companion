@@ -3,12 +3,18 @@
 // same ordered event log (mg-throw/mg-skip broadcasts) and derives identical
 // "whose turn / who won" answers with no server authority.
 //
-// Rules (product decisions, Jul 2026):
+// Rules (product decisions, Jul 2026; scoring changed later that month):
 // - Round-robin turns across TARGET_TOSS_ROUNDS rounds (P1r1, P2r1, ..., P1r2, ...).
-// - A round is won by the smallest landing distance from the target center;
-//   a skip/AFK miss (distance null) loses to any real throw.
-// - Overall winner: most rounds won. Ties → sudden death among ONLY the tied
-//   players (one throw each, lowest wins; still tied → repeat).
+// - Overall winner: LOWEST total distance-from-center summed across every
+//   round played (golf scoring, not "most rounds won" — see
+//   computeTotalDistances/totalDistanceLeaders). A miss (skip, AFK, or the
+//   puck sliding off-screen) charges MISS_PENALTY_DISTANCE instead of a
+//   real distance, so skipping is never better than a bad-but-real throw.
+// - Ties on total → sudden death among ONLY the tied players (one throw
+//   each, lowest single throw wins; still tied → repeat, capped).
+// - roundWinners/computeStandings/standingsLeaders (rounds-won tally) are
+//   kept for callers that want a per-round breakdown, but are NOT what
+//   decides the winner anymore — that's totalDistanceLeaders.
 
 export const TARGET_TOSS_ROUNDS = 3;
 export const TARGET_TOSS_GAME_CODE = "target_toss";
@@ -100,6 +106,35 @@ export function resolveSuddenDeath(contenders: string[], events: TossEvent[]): s
   return slice.filter((e) => e.distance === best).map((e) => e.userId);
 }
 
+/** Charged for a miss (skip/AFK/off-screen) when tallying totals — worse
+ *  than any realistic on-screen distance so skipping is never a good play. */
+export const MISS_PENALTY_DISTANCE = 200;
+
+/**
+ * Sum of every player's landing distance across all events so far (golf
+ * scoring — lower is better). A miss (distance null) charges
+ * MISS_PENALTY_DISTANCE. This is what actually decides the winner.
+ */
+export function computeTotalDistances(
+  order: string[],
+  events: TossEvent[],
+  missPenalty: number = MISS_PENALTY_DISTANCE,
+): Record<string, number> {
+  const totals: Record<string, number> = {};
+  for (const id of order) totals[id] = 0;
+  for (const e of events) {
+    totals[e.userId] = (totals[e.userId] ?? 0) + (e.distance === null ? missPenalty : e.distance);
+  }
+  return totals;
+}
+
+/** Who has the LOWEST total (golf scoring). Several = exactly tied. */
+export function totalDistanceLeaders(totals: Record<string, number>): string[] {
+  let best = Infinity;
+  for (const v of Object.values(totals)) if (v < best) best = v;
+  return Object.keys(totals).filter((id) => totals[id] === best);
+}
+
 // ── Event-log reducer ────────────────────────────────────────────────────────
 // Every client feeds the SAME ordered mg-throw/mg-skip events through this
 // pure reducer, so main→sudden-death→over transitions (and the winner) are
@@ -151,7 +186,7 @@ export function applyTossEvent(
     const events = [...g.events, ev];
     const next: TossGameCore = { ...g, events, seq: g.seq + 1 };
     if (!isPhaseComplete(g.order.length, events.length, rounds)) return next;
-    const leaders = standingsLeaders(computeStandings(g.order, events, rounds));
+    const leaders = totalDistanceLeaders(computeTotalDistances(g.order, events));
     if (leaders.length === 1) return { ...next, winners: leaders };
     return { ...next, sdContenders: leaders, sdEvents: [], sdPass: 1 };
   }
@@ -163,4 +198,46 @@ export function applyTossEvent(
   if (tied.length === 1) return { ...next, winners: tied };
   if (g.sdPass >= SUDDEN_DEATH_MAX_PASSES) return { ...next, winners: tied };
   return { ...next, sdContenders: tied, sdEvents: [], sdPass: g.sdPass + 1 };
+}
+
+// ── Seeded per-round arena layout ────────────────────────────────────────────
+// The target and launcher move vertically each round for variety, but every
+// player in a given round must see the SAME position (fairness — same shot,
+// same round). The host picks one random seed at game start and broadcasts
+// it; every client derives the round's layout from (seed, phase, round) with
+// this pure function, so no extra broadcast is needed per round — same
+// deterministic-shared-seed pattern as resolveBattle.
+
+function mulberry32(seed: number): () => number {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export interface ArenaLayout {
+  /** Target ring center, as a fraction of viewport height. */
+  targetNY: number;
+  /** Launcher pad position, as a fraction of viewport height. */
+  launchNY: number;
+}
+
+/**
+ * Deterministic target/launcher Y position for a given round. Depends only
+ * on (seed, phase, round) — never the player — so it's identical for every
+ * participant and every throw within that round, and changes on the next.
+ * Clamped to the middle 40% of the viewport (0.3..0.7) so there's always
+ * plenty of room above/below to pull back regardless of pull length.
+ */
+export function arenaLayoutForTurn(seed: number, phase: "main" | "sudden", round: number): ArenaLayout {
+  const key = phase === "main" ? round : 1000 + round;
+  const rngTarget = mulberry32(seed ^ (key * 2 + 1));
+  const rngLaunch = mulberry32(seed ^ (key * 2 + 2));
+  return {
+    targetNY: 0.3 + rngTarget() * 0.4,
+    launchNY: 0.3 + rngLaunch() * 0.4,
+  };
 }

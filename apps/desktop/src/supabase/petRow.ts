@@ -32,6 +32,7 @@ export interface PetRow {
   pet_count: number;
   throw_ball_count: number;
   overfeed_count: number;
+  poop_cleaned_count: number;
 }
 
 export function saveToRow(save: PetSaveData, userId: string): PetRow {
@@ -63,6 +64,7 @@ export function saveToRow(save: PetSaveData, userId: string): PetRow {
     pet_count: save.petCount,
     throw_ball_count: save.throwBallCount,
     overfeed_count: save.overfeedCount,
+    poop_cleaned_count: save.poopCleanedCount ?? 0,
   };
 }
 
@@ -94,5 +96,6 @@ export function rowToSave(row: PetRow): PetSaveData {
     petCount: row.pet_count,
     throwBallCount: row.throw_ball_count,
     overfeedCount: row.overfeed_count,
+    poopCleanedCount: row.poop_cleaned_count ?? 0,
   });
 }

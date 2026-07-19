@@ -86,6 +86,9 @@ export interface ActiveMinigame {
   resolvedAt: number | null;
   /** Non-null = game cancelled (someone didn't pick in time); the message. */
   cancelled: string | null;
+  /** userId of whoever hit "Give up" — resolves instantly (no reveal
+   *  drumroll): loss for the quitter, win for the opponent. */
+  forfeitedBy: string | null;
 }
 
 /** Pick window before an RPS game cancels, and the reveal-drumroll length. */
@@ -106,7 +109,7 @@ export function rpsOutcome(mine: RpsMove, theirs: RpsMove): "win" | "lose" | "ti
 // log. All handlers are registered inside join()'s buildAndSubscribe — never
 // open a second channel for the same pet-room topic (dedupe footgun).
 
-export const TOSS_TURN_TIMEOUT_MS = 15_000;
+export const TOSS_TURN_TIMEOUT_MS = 30_000;
 /** Grace before the authority client skips a DEPARTED player's turn. */
 const TOSS_DEPARTED_SKIP_MS = 3_000;
 
@@ -127,6 +130,22 @@ export interface MinigameLobby {
   accepted: { userId: string; name: string }[];
   ready: string[];
 }
+
+/** Live aim preview from the active thrower: pull displacement normalized
+ *  to viewport fractions (matching the `pos` convention) so every viewer's
+ *  screen shows the same relative pull-back regardless of resolution.
+ *  Throttled like `pos`; cleared on release/throw/turn-change/staleness. */
+export interface TossAim {
+  userId: string;
+  dxN: number;
+  dyN: number;
+  /** Local receive time — drives the staleness sweep. */
+  at: number;
+}
+/** Min gap between aim broadcasts (drag mousemove fires far faster). */
+const TOSS_AIM_SEND_MS = 90;
+/** An aim with no update for this long is stale (sender lagged/vanished). */
+const TOSS_AIM_STALE_MS = 800;
 
 /** Slide replay parameters, normalized to screen fractions (like `pos`).
  *  distance null = a miss (puck slid off screen) — still a real throw
@@ -156,6 +175,97 @@ export interface TargetTossState {
   markers: { userId: string; nx: number; ny: number; distance: number }[];
   /** phase:round key the markers belong to — new key wipes them. */
   markersKey: string;
+  /** Players who hit "Give up" mid-game: their remaining turns are
+   *  auto-skipped quickly, and if only one active participant remains,
+   *  that player wins outright. */
+  forfeited: string[];
+}
+
+// ── Chess (Phase 3) ──────────────────────────────────────────────────────────
+// Untimed 1:1 games persisted in the chess_games table (group-scoped) so they
+// survive restarts/room-leaves; Realtime "chess" broadcasts keep connected
+// clients in live sync, the DB row is the resume-of-record. player_a = WHITE
+// (the challenger), player_b = BLACK (the acceptor). Move legality is
+// client-validated (chess.js); the DB enforces turn ownership on updates
+// (MVP trust tradeoff, flagged in the migration).
+
+export const CHESS_GAME_CODE = "chess";
+/** Grace before a cancel proposal can resolve unilaterally against an
+ *  opponent with no room presence (tunable placeholder — deliberately NOT a
+ *  short timer: untimed means no urgency while both players are around). */
+export const CHESS_UNREACHABLE_GRACE_MS = 48 * 3600_000;
+
+/** One SAN move + when it was played. `at` is null for moves written before
+ *  timestamps existed (old rows stored bare SAN strings — chessRowToGame
+ *  normalizes both shapes to this one so the UI never type-checks a union). */
+export interface ChessMoveEntry {
+  san: string;
+  at: string | null;
+}
+
+export interface ChessGame {
+  id: string;
+  groupId: string;
+  /** White (the challenger). */
+  playerAId: string;
+  /** Black (the acceptor). */
+  playerBId: string;
+  fen: string;
+  /** Full SAN log (normalized {san, at}) — drives the move-list widget. */
+  moveHistory: ChessMoveEntry[];
+  currentTurn: string;
+  status: "active" | "finished" | "abandoned";
+  winnerId: string | null;
+  resultReason: string | null;
+  updatedAt: string;
+}
+
+export interface ChessInvite {
+  from: string;
+  fromName: string;
+  at: number;
+}
+
+interface ChessGameRow {
+  id: string;
+  group_id: string;
+  player_a_id: string;
+  player_b_id: string;
+  board_fen: string;
+  move_history: unknown;
+  current_turn: string;
+  status: "active" | "finished" | "abandoned";
+  winner_id: string | null;
+  result_reason: string | null;
+  updated_at: string;
+}
+
+function chessRowToGame(r: ChessGameRow): ChessGame {
+  return {
+    id: r.id,
+    groupId: r.group_id,
+    playerAId: r.player_a_id,
+    playerBId: r.player_b_id,
+    fen: r.board_fen,
+    // Backward-compatible normalize: rows written before move timestamps
+    // hold bare SAN strings; newer rows hold {san, at} objects. Same jsonb
+    // column, no migration — just two accepted shapes on read.
+    moveHistory: Array.isArray(r.move_history)
+      ? (r.move_history as unknown[]).flatMap((m): ChessMoveEntry[] => {
+          if (typeof m === "string") return [{ san: m, at: null }];
+          if (m && typeof m === "object" && typeof (m as { san?: unknown }).san === "string") {
+            const at = (m as { at?: unknown }).at;
+            return [{ san: (m as { san: string }).san, at: typeof at === "string" ? at : null }];
+          }
+          return [];
+        })
+      : [],
+    currentTurn: r.current_turn,
+    status: r.status,
+    winnerId: r.winner_id,
+    resultReason: r.result_reason,
+    updatedAt: r.updated_at,
+  };
 }
 
 const POS_SEND_MS = 200;
@@ -182,6 +292,13 @@ export interface RoomApi {
   /** "turned away" / "host left" style lobby feedback. */
   lobbyNotice: string | null;
   tossGame: TargetTossState | null;
+  /** Live pull-back preview from the active thrower (null = not aiming). */
+  tossAim: TossAim | null;
+  /** Broadcast my pull displacement while aiming (viewport fractions;
+   *  throttled internally — safe to call from every mousemove). */
+  sendTossAim: (dxN: number, dyN: number) => void;
+  /** Tell viewers the pull ended (release or cancel). */
+  clearTossAim: () => void;
   join: (group: GroupInfo) => void;
   leaveRoom: () => void;
   updateMyPosition: (nx: number, ny: number) => void;
@@ -197,6 +314,12 @@ export interface RoomApi {
   declineGameInvite: () => void;
   sendRpsMove: (move: RpsMove) => void;
   clearMinigame: () => void;
+  /** "Give up" (RPS): decisive — I take the loss, the opponent gets the
+   *  win; both sides' onMinigameResolved fires and records normally. */
+  forfeitMinigame: () => void;
+  /** "Give up" (Target Toss): broadcasts the forfeit, records nothing here
+   *  (the caller records the quitter's own loss) and closes my board. */
+  forfeitTossGame: () => void;
   createMinigameLobby: (cap: number) => void;
   acceptLobbyInvite: () => void;
   declineLobbyInvite: () => void;
@@ -206,6 +329,45 @@ export interface RoomApi {
   submitToss: (fx: Omit<TossThrowFx, "id" | "userId">) => void;
   dismissTossGame: () => void;
   clearLobbyNotice: () => void;
+  // ── Chess ──────────────────────────────────────────────────────────────
+  /** Games loaded for this room's group (active + just-ended ones still
+   *  showing their result banner). */
+  chessGames: ChessGame[];
+  incomingChessInvite: ChessInvite | null;
+  outgoingChessInviteTo: string | null;
+  /** Friendly feedback ("you already have a game with them", etc.). */
+  chessNotice: string | null;
+  clearChessNotice: () => void;
+  /** The game whose board panel is open (null = closed). */
+  openChessGameId: string | null;
+  /** Panel collapsed to a floating chip — game/subscription stays live. */
+  chessMinimized: boolean;
+  /** Pending cancel proposals per gameId (from = proposer). */
+  chessCancelProposals: Record<string, { from: string; at: number }>;
+  chessChallenge: (targetUserId: string) => void;
+  acceptChessInvite: () => void;
+  declineChessInvite: () => void;
+  openChessGame: (gameId: string) => void;
+  minimizeChessPanel: () => void;
+  restoreChessPanel: () => void;
+  closeChessPanel: () => void;
+  /** Persist + broadcast one locally-validated move (and any game end the
+   *  move causes — checkmate/draw — in the same update). */
+  sendChessMove: (
+    gameId: string,
+    san: string,
+    fen: string,
+    end?: { winnerId: string | null; reason: "checkmate" | "draw" },
+  ) => void;
+  /** "Give up": decisive — my loss, opponent's win. */
+  resignChess: (gameId: string) => void;
+  /** Propose a no-score-impact mutual cancel to the opponent. */
+  proposeChessCancel: (gameId: string) => void;
+  /** Respond to an incoming cancel proposal. */
+  respondChessCancel: (gameId: string, accept: boolean) => void;
+  /** Unreachable-opponent escape hatch (no score impact) — UI gates this on
+   *  the opponent being absent + no game activity for the grace period. */
+  cancelChessUnreachable: (gameId: string) => void;
 }
 
 interface UseRoomOptions {
@@ -217,6 +379,11 @@ interface UseRoomOptions {
   onSocialPet: (fromName: string) => void;
   onBattleResolved: (won: boolean, opponentName: string) => void;
   onMinigameResolved: (outcome: "win" | "lose" | "tie", opponentName: string) => void;
+  /** A chess game I play in reached a DECISIVE end (checkmate/resignation)
+   *  or a draw — outcome is from MY perspective. Fires exactly once per
+   *  game per session; the callback owns result recording/history. Never
+   *  fires for abandoned (cancelled) games — those have no score impact. */
+  onChessResolved: (outcome: "win" | "lose" | "tie", opponentName: string) => void;
 }
 
 function snapshotOf(save: PetSaveData): BattlerSnapshot {
@@ -237,6 +404,7 @@ export function useRoom({
   onSocialPet,
   onBattleResolved,
   onMinigameResolved,
+  onChessResolved,
 }: UseRoomOptions): RoomApi {
   const [activeGroup, setActiveGroup] = useState<GroupInfo | null>(null);
   const [connected, setConnected] = useState(false);
@@ -255,6 +423,20 @@ export function useRoom({
   const [minigameLobby, setMinigameLobby] = useState<MinigameLobby | null>(null);
   const [lobbyNotice, setLobbyNotice] = useState<string | null>(null);
   const [tossGame, setTossGame] = useState<TargetTossState | null>(null);
+  const [tossAim, setTossAim] = useState<TossAim | null>(null);
+  const lastAimSentAtRef = useRef(0);
+  // ── Chess state ──────────────────────────────────────────────────────────
+  const [chessGames, setChessGames] = useState<ChessGame[]>([]);
+  const [incomingChessInvite, setIncomingChessInvite] = useState<ChessInvite | null>(null);
+  const [outgoingChessInviteTo, setOutgoingChessInviteTo] = useState<string | null>(null);
+  const [chessNotice, setChessNotice] = useState<string | null>(null);
+  const [openChessGameId, setOpenChessGameId] = useState<string | null>(null);
+  const [chessMinimized, setChessMinimized] = useState(false);
+  const [chessCancelProposals, setChessCancelProposals] = useState<Record<string, { from: string; at: number }>>({});
+  const chessGamesRef = useRef<ChessGame[]>([]);
+  chessGamesRef.current = chessGames;
+  /** Game ids whose decisive end was already reported to onChessResolved. */
+  const chessRecordedRef = useRef<Set<string>>(new Set());
   // Ref mirrors for the broadcast handlers (registered once per join, so
   // they can't close over fresh state).
   const lobbyRef = useRef<MinigameLobby | null>(null);
@@ -278,6 +460,8 @@ export function useRoom({
   onBattleResolvedRef.current = onBattleResolved;
   const onMinigameResolvedRef = useRef(onMinigameResolved);
   onMinigameResolvedRef.current = onMinigameResolved;
+  const onChessResolvedRef = useRef(onChessResolved);
+  onChessResolvedRef.current = onChessResolved;
 
   // Bumped on every teardown/join so an async-deferred channel build (see
   // join's stale-topic path) can detect it's been superseded and bail —
@@ -308,7 +492,16 @@ export function useRoom({
     setMinigameLobby(null);
     setLobbyNotice(null);
     setTossGame(null);
+    setTossAim(null);
     sentLobbyJoinRef.current = false;
+    // Chess: leaving the ROOM never resolves a game (it lives in the DB and
+    // resumes on rejoin) — only the local panel/list state clears here.
+    setChessGames([]);
+    setIncomingChessInvite(null);
+    setOutgoingChessInviteTo(null);
+    setOpenChessGameId(null);
+    setChessMinimized(false);
+    setChessCancelProposals({});
     if (battleRewardTimer.current) clearTimeout(battleRewardTimer.current);
   }, []);
 
@@ -342,9 +535,34 @@ export function useRoom({
           turnStartedAt: Date.now(),
         };
       });
+      // A resolved turn always ends that player's aim preview (covers both
+      // the throw itself and an authority skip).
+      setTossAim((prev) => (prev?.userId === ev.userId ? null : prev));
     },
     [],
   );
+
+  /** (Re)loads this group's active chess games from the DB — the
+   *  resume-of-record (broadcasts only keep LIVE clients in sync). */
+  const loadChessGames = useCallback(async (groupId: string) => {
+    if (!supabase) return;
+    const { data, error } = await supabase
+      .from("chess_games")
+      .select("*")
+      .eq("group_id", groupId)
+      .eq("status", "active");
+    if (error) {
+      console.error("[chess] load failed:", error);
+      return;
+    }
+    const loaded = ((data ?? []) as ChessGameRow[]).map(chessRowToGame);
+    // Active list is replaced by DB truth; keep local just-ended games whose
+    // result banner is still on screen.
+    setChessGames((prev) => {
+      const ended = prev.filter((g) => g.status !== "active" && !loaded.some((l) => l.id === g.id));
+      return [...loaded, ...ended];
+    });
+  }, []);
 
   /** Starts (or schedules) the local battle replay once both sides agree. */
   const beginBattle = useCallback(
@@ -442,7 +660,7 @@ export function useRoom({
         // with a kind discriminator (functionally the plan's mg-* events).
         channel.on("broadcast", { event: "mg" }, ({ payload }) => {
           const p = payload as {
-            kind: "invite" | "join" | "ready" | "roster" | "start" | "throw" | "skip" | "cancel";
+            kind: "invite" | "join" | "ready" | "roster" | "start" | "throw" | "skip" | "cancel" | "forfeit" | "aim";
             from: string;
             fromName?: string;
             gameCode?: string;
@@ -460,6 +678,9 @@ export function useRoom({
             spinDegrees?: number;
             distance?: number | null;
             id?: string;
+            dxN?: number;
+            dyN?: number;
+            released?: boolean;
           };
           if (!userId || p.from === userId) return;
 
@@ -553,6 +774,7 @@ export function useRoom({
               lastFx: null,
               markers: [],
               markersKey: "main:1",
+              forfeited: [],
             });
             return;
           }
@@ -581,6 +803,35 @@ export function useRoom({
             return;
           }
 
+          if (p.kind === "aim") {
+            // Live pull preview from the active thrower — display-only state
+            // (never touches the reducer/event log; no seq guard needed —
+            // last-write-wins is exactly right for a preview).
+            if (p.released === true) {
+              setTossAim((prev) => (prev?.userId === p.from ? null : prev));
+              return;
+            }
+            setTossAim({
+              userId: p.from,
+              dxN: typeof p.dxN === "number" ? p.dxN : 0,
+              dyN: typeof p.dyN === "number" ? p.dyN : 0,
+              at: Date.now(),
+            });
+            return;
+          }
+
+          if (p.kind === "forfeit") {
+            // A participant gave up mid-game: they're out of contention.
+            // Their remaining turns get fast-skipped (see the AFK effect),
+            // and the solo-remaining-player effect resolves an outright win.
+            setTossGame((prev) =>
+              prev && prev.core.order.includes(p.from) && !prev.forfeited.includes(p.from)
+                ? { ...prev, forfeited: [...prev.forfeited, p.from] }
+                : prev,
+            );
+            return;
+          }
+
           if (p.kind === "cancel") {
             if (lobbyRef.current?.hostId === p.from) {
               lobbyRef.current = null;
@@ -592,7 +843,7 @@ export function useRoom({
 
         channel.on("broadcast", { event: "minigame" }, ({ payload }) => {
           const p = payload as {
-            kind: "invite" | "accept" | "decline" | "move";
+            kind: "invite" | "accept" | "decline" | "move" | "forfeit";
             from: string;
             fromName: string;
             to: string;
@@ -612,6 +863,7 @@ export function useRoom({
               startedAt: Date.now(),
               resolvedAt: null,
               cancelled: null,
+              forfeitedBy: null,
             });
           } else if (p.kind === "decline") {
             setOutgoingGameInviteTo(null);
@@ -623,12 +875,169 @@ export function useRoom({
                 ? { ...next, outcome: rpsOutcome(next.myMove, next.theirMove!), resolvedAt: Date.now() }
                 : next;
             });
+          } else if (p.kind === "forfeit") {
+            // Opponent gave up — decisive win for me, resolved instantly
+            // (no reveal drumroll for a forfeit).
+            setMinigame((prev) => {
+              if (!prev || prev.opponentId !== p.from || prev.outcome || prev.cancelled) return prev;
+              return { ...prev, outcome: "win", resolvedAt: Date.now(), forfeitedBy: p.from };
+            });
+          }
+        });
+
+        // ── Chess broadcasts (live sync; the DB row is the resume truth) ──
+        channel.on("broadcast", { event: "chess" }, ({ payload }) => {
+          const p = payload as {
+            kind:
+              | "invite"
+              | "accept"
+              | "decline"
+              | "start"
+              | "move"
+              | "end"
+              | "cancel-propose"
+              | "cancel-decline";
+            from: string;
+            fromName?: string;
+            to?: string;
+            gameId?: string;
+            san?: string;
+            at?: string;
+            fen?: string;
+            ply?: number;
+            status?: "finished" | "abandoned";
+            winnerId?: string | null;
+            reason?: string;
+          };
+          if (!userId || p.from === userId) return;
+
+          if (p.kind === "invite") {
+            if (p.to !== userId) return;
+            setIncomingChessInvite({ from: p.from, fromName: p.fromName ?? "?", at: Date.now() });
+            return;
+          }
+          if (p.kind === "decline") {
+            if (p.to !== userId) return;
+            setOutgoingChessInviteTo(null);
+            setChessNotice(`${p.fromName ?? "They"} declined the chess challenge.`);
+            return;
+          }
+          if (p.kind === "accept") {
+            if (p.to !== userId) return;
+            // I challenged (I'm white/player_a); they accepted → I create
+            // the DB row, then announce it so everyone (acceptor +
+            // spectators) picks it up.
+            setOutgoingChessInviteTo(null);
+            void (async () => {
+              if (!supabase || !channelRef.current) return;
+              const { data, error } = await supabase
+                .from("chess_games")
+                .insert({
+                  group_id: group.id,
+                  player_a_id: userId,
+                  player_b_id: p.from,
+                  current_turn: userId,
+                })
+                .select("*")
+                .single();
+              if (error) {
+                // 23505 = the one-active-game-per-pair partial unique index.
+                setChessNotice(
+                  error.code === "23505"
+                    ? "You already have an active game with them — finish or cancel it first."
+                    : `Couldn't start the game: ${error.message}`,
+                );
+                return;
+              }
+              const game = chessRowToGame(data as ChessGameRow);
+              setChessGames((prev) => [game, ...prev.filter((g) => g.id !== game.id)]);
+              setOpenChessGameId(game.id);
+              setChessMinimized(false);
+              void channelRef.current.send({
+                type: "broadcast",
+                event: "chess",
+                payload: { kind: "start", from: userId, gameId: game.id },
+              });
+            })();
+            return;
+          }
+          if (p.kind === "start" && p.gameId) {
+            // A new game exists — fetch its row (spectators too); the
+            // acceptor also opens their board.
+            void (async () => {
+              if (!supabase) return;
+              const { data } = await supabase.from("chess_games").select("*").eq("id", p.gameId).maybeSingle();
+              if (!data) return;
+              const g = chessRowToGame(data as ChessGameRow);
+              setChessGames((prev) => [g, ...prev.filter((x) => x.id !== g.id)]);
+              if (g.playerAId === userId || g.playerBId === userId) {
+                setOpenChessGameId(g.id);
+                setChessMinimized(false);
+                setIncomingChessInvite(null);
+              }
+            })();
+            return;
+          }
+          if (p.kind === "move" && p.gameId && p.san && p.fen) {
+            setChessGames((prev) =>
+              prev.map((g) => {
+                if (g.id !== p.gameId || g.status !== "active") return g;
+                // ply = history length AFTER the move — apply only if it
+                // extends ours exactly (drops dupes/stale echoes; a real
+                // gap self-heals on the next DB load).
+                if (typeof p.ply === "number" && p.ply !== g.moveHistory.length + 1) return g;
+                const nextTurn = g.currentTurn === g.playerAId ? g.playerBId : g.playerAId;
+                return {
+                  ...g,
+                  fen: p.fen!,
+                  moveHistory: [...g.moveHistory, { san: p.san!, at: p.at ?? null }],
+                  currentTurn: nextTurn,
+                  status: p.status ?? "active",
+                  winnerId: p.status ? (p.winnerId ?? null) : g.winnerId,
+                  resultReason: p.status ? (p.reason ?? null) : g.resultReason,
+                  updatedAt: new Date().toISOString(),
+                };
+              }),
+            );
+            return;
+          }
+          if (p.kind === "end" && p.gameId && p.status) {
+            setChessGames((prev) =>
+              prev.map((g) =>
+                g.id === p.gameId && g.status === "active"
+                  ? {
+                      ...g,
+                      status: p.status!,
+                      winnerId: p.winnerId ?? null,
+                      resultReason: p.reason ?? null,
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : g,
+              ),
+            );
+            setChessCancelProposals((prev) => {
+              if (!(p.gameId! in prev)) return prev;
+              const next = { ...prev };
+              delete next[p.gameId!];
+              return next;
+            });
+            return;
+          }
+          if (p.kind === "cancel-propose" && p.gameId) {
+            if (p.to !== userId) return;
+            setChessCancelProposals((prev) => ({ ...prev, [p.gameId!]: { from: p.from, at: Date.now() } }));
+            return;
+          }
+          if (p.kind === "cancel-decline" && p.gameId) {
+            if (p.to !== userId) return;
+            setChessNotice("Your cancel proposal was declined — the game continues.");
           }
         });
 
         channel.subscribe((status) => {
           if (status === "SUBSCRIBED") {
             setConnected(true);
+            void loadChessGames(group.id);
             const s = saveRef.current;
             void channel.track({
               userId,
@@ -658,7 +1067,7 @@ export function useRoom({
         buildAndSubscribe();
       }
     },
-    [userId, isEgg, teardown, beginBattle, applyToss],
+    [userId, isEgg, teardown, beginBattle, applyToss, loadChessGames],
   );
 
   // Position publisher: GameView pushes the local pet's normalized position
@@ -709,6 +1118,10 @@ export function useRoom({
       });
       setIncomingInvite((inv) => (inv && now - inv.at > INVITE_TTL_MS ? null : inv));
       setIncomingGameInvite((inv) => (inv && now - inv.at > INVITE_TTL_MS ? null : inv));
+      setIncomingChessInvite((inv) => (inv && now - inv.at > INVITE_TTL_MS ? null : inv));
+      // A pull preview with no fresh update is stale (sender lagged out or
+      // the release broadcast was lost) — drop it rather than freeze it.
+      setTossAim((prev) => (prev && now - prev.at > TOSS_AIM_STALE_MS ? null : prev));
     }, 1000);
     return () => clearInterval(id);
   }, [activeGroup]);
@@ -834,6 +1247,7 @@ export function useRoom({
       startedAt: Date.now(),
       resolvedAt: null,
       cancelled: null,
+      forfeitedBy: null,
     });
     setIncomingGameInvite(null);
   }, [incomingGameInvite, userId]);
@@ -869,6 +1283,24 @@ export function useRoom({
   );
 
   const clearMinigame = useCallback(() => setMinigame(null), []);
+
+  // "Give up" (RPS): always decisive — I take the loss, the opponent gets
+  // the win. Setting outcome fires the normal onMinigameResolved path on
+  // BOTH clients, so results/history record exactly like a played-out game.
+  const forfeitMinigame = useCallback(() => {
+    const g = minigame;
+    if (!g || g.outcome || g.cancelled || !channelRef.current || !userId) return;
+    void channelRef.current.send({
+      type: "broadcast",
+      event: "minigame",
+      payload: { kind: "forfeit", from: userId, fromName: nameRef.current, to: g.opponentId },
+    });
+    setMinigame((prev) =>
+      prev && !prev.outcome && !prev.cancelled
+        ? { ...prev, outcome: "lose", resolvedAt: Date.now(), forfeitedBy: userId }
+        : prev,
+    );
+  }, [userId, minigame]);
 
   // ── Target Toss lobby + game verbs ───────────────────────────────────────
   const sendMg = useCallback((payload: Record<string, unknown>) => {
@@ -932,6 +1364,7 @@ export function useRoom({
       lastFx: null,
       markers: [],
       markersKey: "main:1",
+      forfeited: [],
     });
     lobbyRef.current = null;
     setMinigameLobby(null);
@@ -974,7 +1407,279 @@ export function useRoom({
     if (tossRef.current && tossRef.current.core.winners.length > 0) setTossGame(null);
   }, []);
 
+  // Live aim preview publisher — throttled like `pos` so drag mousemoves
+  // (which fire far faster) don't flood the channel. Display-only: never
+  // enters the reducer/event log.
+  const sendTossAim = useCallback(
+    (dxN: number, dyN: number) => {
+      const g = tossRef.current;
+      if (!g || !userId || !channelRef.current) return;
+      const turn = currentTossTurn(g.core);
+      if (!turn || turn.userId !== userId) return;
+      const now = Date.now();
+      if (now - lastAimSentAtRef.current < TOSS_AIM_SEND_MS) return;
+      lastAimSentAtRef.current = now;
+      sendMg({ kind: "aim", from: userId, dxN, dyN });
+    },
+    [userId, sendMg],
+  );
+
+  const clearTossAim = useCallback(() => {
+    if (!userId || !channelRef.current) return;
+    lastAimSentAtRef.current = 0;
+    sendMg({ kind: "aim", from: userId, released: true });
+  }, [userId, sendMg]);
+
+  // "Give up" (Target Toss): broadcast the forfeit and close my own board.
+  // The CALLER records my loss (GameView owns result recording); remaining
+  // players fast-skip my turns, and a lone remaining player wins outright.
+  const forfeitTossGame = useCallback(() => {
+    const g = tossRef.current;
+    if (!g || !userId || g.core.winners.length > 0 || !g.core.order.includes(userId)) return;
+    sendMg({ kind: "forfeit", from: userId });
+    setTossGame(null);
+    setLobbyNotice("You gave up the game — it counts as a loss.");
+  }, [userId, sendMg]);
+
+  // Forfeits thin the active roster: once only ONE non-forfeited participant
+  // remains, that player wins outright (decisive, per the forfeit rule —
+  // never a silent cancel). Every remaining client derives this identically
+  // from the same forfeited list, no extra broadcast needed.
+  useEffect(() => {
+    if (!tossGame || tossGame.core.winners.length > 0 || tossGame.forfeited.length === 0) return;
+    const active = tossGame.core.order.filter((id) => !tossGame.forfeited.includes(id));
+    if (active.length === 1) {
+      setTossGame((prev) =>
+        prev && prev.core.winners.length === 0 ? { ...prev, core: { ...prev.core, winners: active } } : prev,
+      );
+    }
+  }, [tossGame]);
+
   const clearLobbyNotice = useCallback(() => setLobbyNotice(null), []);
+
+  // ── Chess verbs ──────────────────────────────────────────────────────────
+  const sendChessEvent = useCallback((payload: Record<string, unknown>) => {
+    if (!channelRef.current) return;
+    void channelRef.current.send({ type: "broadcast", event: "chess", payload });
+  }, []);
+
+  const chessChallenge = useCallback(
+    (targetUserId: string) => {
+      if (!channelRef.current || !userId || outgoingChessInviteTo) return;
+      // One active game per pair — pre-check locally for a friendly message
+      // (the DB's partial unique index is the real enforcement).
+      const existing = chessGamesRef.current.find(
+        (g) =>
+          g.status === "active" &&
+          ((g.playerAId === userId && g.playerBId === targetUserId) ||
+            (g.playerBId === userId && g.playerAId === targetUserId)),
+      );
+      if (existing) {
+        setChessNotice("You already have an active game with them — finish or cancel it first.");
+        return;
+      }
+      setOutgoingChessInviteTo(targetUserId);
+      sendChessEvent({ kind: "invite", from: userId, fromName: nameRef.current, to: targetUserId });
+    },
+    [userId, outgoingChessInviteTo, sendChessEvent],
+  );
+
+  const acceptChessInvite = useCallback(() => {
+    const inv = incomingChessInvite;
+    if (!inv || !userId) return;
+    sendChessEvent({ kind: "accept", from: userId, fromName: nameRef.current, to: inv.from });
+    setIncomingChessInvite(null);
+    // The board opens when the challenger's "start" (with the game id) lands.
+  }, [incomingChessInvite, userId, sendChessEvent]);
+
+  const declineChessInvite = useCallback(() => {
+    const inv = incomingChessInvite;
+    if (!inv || !userId) return;
+    sendChessEvent({ kind: "decline", from: userId, fromName: nameRef.current, to: inv.from });
+    setIncomingChessInvite(null);
+  }, [incomingChessInvite, userId, sendChessEvent]);
+
+  const openChessGame = useCallback((gameId: string) => {
+    setOpenChessGameId(gameId);
+    setChessMinimized(false);
+  }, []);
+  // Minimize never forfeits — the game/subscription stays live behind the chip.
+  const minimizeChessPanel = useCallback(() => setChessMinimized(true), []);
+  const restoreChessPanel = useCallback(() => setChessMinimized(false), []);
+  const closeChessPanel = useCallback(() => {
+    // Ended games leave the list once their result panel closes.
+    setChessGames((prev) => prev.filter((g) => g.status === "active"));
+    setOpenChessGameId(null);
+    setChessMinimized(false);
+  }, []);
+
+  const sendChessMove = useCallback(
+    (gameId: string, san: string, fen: string, end?: { winnerId: string | null; reason: "checkmate" | "draw" }) => {
+      const g = chessGamesRef.current.find((x) => x.id === gameId);
+      if (!g || !userId || g.status !== "active" || g.currentTurn !== userId) return;
+      const opponent = g.playerAId === userId ? g.playerBId : g.playerAId;
+      // Moves are stored as {san, at} going forward (same jsonb column —
+      // chessRowToGame still accepts old bare-string rows on read).
+      const entry: ChessMoveEntry = { san, at: new Date().toISOString() };
+      const history = [...g.moveHistory, entry];
+      // Optimistic local apply; DB persist (allowed: it's my turn on the
+      // existing row, per the RLS update policy); then the live broadcast.
+      setChessGames((prev) =>
+        prev.map((x) =>
+          x.id === gameId
+            ? {
+                ...x,
+                fen,
+                moveHistory: history,
+                currentTurn: opponent,
+                status: end ? "finished" : "active",
+                winnerId: end ? end.winnerId : x.winnerId,
+                resultReason: end ? end.reason : x.resultReason,
+                updatedAt: new Date().toISOString(),
+              }
+            : x,
+        ),
+      );
+      if (supabase) {
+        void supabase
+          .from("chess_games")
+          .update({
+            board_fen: fen,
+            move_history: history,
+            current_turn: opponent,
+            updated_at: new Date().toISOString(),
+            ...(end ? { status: "finished", winner_id: end.winnerId, result_reason: end.reason } : {}),
+          })
+          .eq("id", gameId)
+          .then(({ error }) => {
+            if (error) console.error("[chess] move persist failed:", error);
+          });
+      }
+      sendChessEvent({
+        kind: "move",
+        from: userId,
+        gameId,
+        san,
+        at: entry.at,
+        fen,
+        ply: history.length,
+        ...(end ? { status: "finished", winnerId: end.winnerId, reason: end.reason } : {}),
+      });
+    },
+    [userId, sendChessEvent],
+  );
+
+  // "Give up" (chess resign): always decisive — my loss, their win. Works
+  // off-turn via the SECURITY DEFINER RPC (RLS only lets the current-turn
+  // player update the row directly).
+  const resignChess = useCallback(
+    (gameId: string) => {
+      const g = chessGamesRef.current.find((x) => x.id === gameId);
+      if (!g || !userId || g.status !== "active") return;
+      if (g.playerAId !== userId && g.playerBId !== userId) return;
+      const opponent = g.playerAId === userId ? g.playerBId : g.playerAId;
+      setChessGames((prev) =>
+        prev.map((x) =>
+          x.id === gameId ? { ...x, status: "finished", winnerId: opponent, resultReason: "resignation" } : x,
+        ),
+      );
+      if (supabase) {
+        void supabase.rpc("resign_chess_game", { p_game_id: gameId }).then(({ error }) => {
+          if (error) console.error("[chess] resign failed:", error);
+        });
+      }
+      sendChessEvent({ kind: "end", from: userId, gameId, status: "finished", winnerId: opponent, reason: "resignation" });
+    },
+    [userId, sendChessEvent],
+  );
+
+  // Mutual cancel: propose → opponent explicitly accepts → 'abandoned' with
+  // NO record_minigame_result for either side. Nobody can dodge a loss by
+  // closing the app — a silent disconnect never resolves anything.
+  const proposeChessCancel = useCallback(
+    (gameId: string) => {
+      const g = chessGamesRef.current.find((x) => x.id === gameId);
+      if (!g || !userId || g.status !== "active") return;
+      const opponent = g.playerAId === userId ? g.playerBId : g.playerAId;
+      sendChessEvent({ kind: "cancel-propose", from: userId, fromName: nameRef.current, to: opponent, gameId });
+      setChessNotice("Cancel proposed — the game ends only if your opponent accepts.");
+    },
+    [userId, sendChessEvent],
+  );
+
+  const respondChessCancel = useCallback(
+    (gameId: string, accept: boolean) => {
+      const proposal = chessCancelProposals[gameId];
+      if (!proposal || !userId) return;
+      setChessCancelProposals((prev) => {
+        const next = { ...prev };
+        delete next[gameId];
+        return next;
+      });
+      if (!accept) {
+        sendChessEvent({ kind: "cancel-decline", from: userId, to: proposal.from, gameId });
+        return;
+      }
+      setChessGames((prev) =>
+        prev.map((x) =>
+          x.id === gameId ? { ...x, status: "abandoned", winnerId: null, resultReason: "mutual_cancel" } : x,
+        ),
+      );
+      if (supabase) {
+        void supabase.rpc("cancel_chess_game", { p_game_id: gameId, p_reason: "mutual_cancel" }).then(({ error }) => {
+          if (error) console.error("[chess] mutual cancel failed:", error);
+        });
+      }
+      sendChessEvent({ kind: "end", from: userId, gameId, status: "abandoned", winnerId: null, reason: "mutual_cancel" });
+    },
+    [userId, chessCancelProposals, sendChessEvent],
+  );
+
+  // Unreachable-opponent fallback: unilateral, no score impact. The UI gates
+  // this on the opponent being absent from the room AND the game showing no
+  // activity for CHESS_UNREACHABLE_GRACE_MS (MVP trust: presence history
+  // isn't verifiable server-side).
+  const cancelChessUnreachable = useCallback(
+    (gameId: string) => {
+      const g = chessGamesRef.current.find((x) => x.id === gameId);
+      if (!g || !userId || g.status !== "active") return;
+      setChessGames((prev) =>
+        prev.map((x) =>
+          x.id === gameId ? { ...x, status: "abandoned", winnerId: null, resultReason: "opponent_unreachable" } : x,
+        ),
+      );
+      if (supabase) {
+        void supabase
+          .rpc("cancel_chess_game", { p_game_id: gameId, p_reason: "opponent_unreachable" })
+          .then(({ error }) => {
+            if (error) console.error("[chess] unreachable cancel failed:", error);
+          });
+      }
+      sendChessEvent({ kind: "end", from: userId, gameId, status: "abandoned", winnerId: null, reason: "opponent_unreachable" });
+    },
+    [userId, sendChessEvent],
+  );
+
+  const clearChessNotice = useCallback(() => setChessNotice(null), []);
+
+  // Decisive endings (checkmate/resignation) and draws fire onChessResolved
+  // exactly once per game, on each PLAYER client alive to see it (a fully
+  // offline player misses their record — same accepted tradeoff as the
+  // notification system). Abandoned games never fire: no score impact.
+  useEffect(() => {
+    if (!userId) return;
+    for (const g of chessGames) {
+      if (g.status !== "finished") continue;
+      if (g.playerAId !== userId && g.playerBId !== userId) continue;
+      if (chessRecordedRef.current.has(g.id)) continue;
+      chessRecordedRef.current.add(g.id);
+      const opponentId = g.playerAId === userId ? g.playerBId : g.playerAId;
+      const opponentName = members.find((m) => m.userId === opponentId)?.name ?? "your opponent";
+      const outcome: "win" | "lose" | "tie" =
+        g.resultReason === "draw" ? "tie" : g.winnerId === userId ? "win" : "lose";
+      onChessResolvedRef.current(outcome, opponentName);
+    }
+  }, [chessGames, userId, members]);
 
   // AFK handling: the ACTIVE player's own client self-skips after the turn
   // timeout; if the active player has LEFT the room (gone from presence),
@@ -996,9 +1701,15 @@ export function useRoom({
         return;
       }
       const present = (id_: string) => id_ === userId || members.some((m) => m.userId === id_);
-      if (!present(t.userId)) {
-        const authority = g.core.order.find(present);
-        if (authority === userId && elapsed >= TOSS_TURN_TIMEOUT_MS + TOSS_DEPARTED_SKIP_MS) {
+      // A forfeited player is "gone" even if still present in the room —
+      // their turns fast-skip (short grace only, no full AFK wait).
+      const gone = g.forfeited.includes(t.userId) || !present(t.userId);
+      if (gone) {
+        const authority = g.core.order.find((id_) => present(id_) && !g.forfeited.includes(id_));
+        const wait = g.forfeited.includes(t.userId)
+          ? TOSS_DEPARTED_SKIP_MS
+          : TOSS_TURN_TIMEOUT_MS + TOSS_DEPARTED_SKIP_MS;
+        if (authority === userId && elapsed >= wait) {
           skipTossTurn(t.userId);
         }
       }
@@ -1022,8 +1733,12 @@ export function useRoom({
   // after start).
   useEffect(() => {
     if (!tossGame || !userId || tossGame.core.winners.length > 0) return;
+    // Forfeit-driven dwindling is NOT a cancel — the solo-remaining-player
+    // effect above resolves it as a decisive win instead.
+    const activeOrder = tossGame.core.order.filter((id) => !tossGame.forfeited.includes(id));
+    if (activeOrder.length <= 1) return;
     const present = (id: string) => id === userId || members.some((m) => m.userId === id);
-    const remaining = tossGame.core.order.filter(present).length;
+    const remaining = activeOrder.filter(present).length;
     if (remaining <= 1) {
       setTossGame(null);
       setLobbyNotice("Not enough players left — game cancelled.");
@@ -1083,6 +1798,9 @@ export function useRoom({
     minigameLobby,
     lobbyNotice,
     tossGame,
+    tossAim,
+    sendTossAim,
+    clearTossAim,
     join,
     leaveRoom: teardown,
     updateMyPosition,
@@ -1098,6 +1816,8 @@ export function useRoom({
     declineGameInvite,
     sendRpsMove,
     clearMinigame,
+    forfeitMinigame,
+    forfeitTossGame,
     createMinigameLobby,
     acceptLobbyInvite,
     declineLobbyInvite,
@@ -1107,5 +1827,25 @@ export function useRoom({
     submitToss,
     dismissTossGame,
     clearLobbyNotice,
+    chessGames,
+    incomingChessInvite,
+    outgoingChessInviteTo,
+    chessNotice,
+    clearChessNotice,
+    openChessGameId,
+    chessMinimized,
+    chessCancelProposals,
+    chessChallenge,
+    acceptChessInvite,
+    declineChessInvite,
+    openChessGame,
+    minimizeChessPanel,
+    restoreChessPanel,
+    closeChessPanel,
+    sendChessMove,
+    resignChess,
+    proposeChessCancel,
+    respondChessCancel,
+    cancelChessUnreachable,
   };
 }

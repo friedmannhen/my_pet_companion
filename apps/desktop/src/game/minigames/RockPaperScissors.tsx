@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import type { PetSaveData } from "@pet/core";
 import { spriteFor, emojiFor } from "../petSprites";
+import { Tooltip } from "../Tooltip";
 import {
   RPS_PICK_TIMEOUT_MS,
   RPS_REVEAL_MS,
@@ -48,6 +49,7 @@ export function RockPaperScissors({ room, userId, mySave }: { room: RoomApi; use
     ? Math.max(0, Math.ceil((RPS_REVEAL_MS - (Date.now() - game.resolvedAt)) / 1000))
     : null;
   const revealed = game.outcome !== null && revealRemaining === 0;
+  const iForfeited = game.forfeitedBy === userId;
 
   const panel: React.CSSProperties = {
     display: "flex",
@@ -108,28 +110,64 @@ export function RockPaperScissors({ room, userId, mySave }: { room: RoomApi; use
             ) : (
               <div style={{ display: "flex", gap: 14 }}>
                 {MOVES.map((m) => (
-                  <motion.button
-                    key={m}
-                    whileHover={{ scale: 1.12 }}
-                    whileTap={{ scale: 0.94 }}
-                    title={m}
-                    onClick={() => room.sendRpsMove(m)}
-                    style={{
-                      cursor: "pointer",
-                      border: "2px solid rgba(255,255,255,0.18)",
-                      borderRadius: 18,
-                      width: 88,
-                      height: 88,
-                      fontSize: 46,
-                      background: "rgba(255,255,255,0.08)",
-                    }}
-                  >
-                    {RPS_EMOJI[m]}
-                  </motion.button>
+                  <Tooltip key={m} label={m}>
+                    <motion.button
+                      whileHover={{ scale: 1.12 }}
+                      whileTap={{ scale: 0.94 }}
+                      onClick={() => room.sendRpsMove(m)}
+                      style={{
+                        cursor: "pointer",
+                        border: "2px solid rgba(255,255,255,0.18)",
+                        borderRadius: 18,
+                        width: 88,
+                        height: 88,
+                        fontSize: 46,
+                        background: "rgba(255,255,255,0.08)",
+                      }}
+                    >
+                      {RPS_EMOJI[m]}
+                    </motion.button>
+                  </Tooltip>
                 ))}
               </div>
             )}
             <div style={{ fontSize: 11, opacity: 0.6 }}>Pick before the timer runs out!</div>
+            {/* Give up — decisive: my loss, their win (Phase 1 forfeit). */}
+            <Tooltip label="Concede this game — counts as a loss for you and a win for your opponent">
+              <button
+                onClick={room.forfeitMinigame}
+                style={{
+                  cursor: "pointer",
+                  border: "1px solid rgba(248,113,113,0.4)",
+                  borderRadius: 8,
+                  padding: "4px 12px",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: "rgba(248,113,113,0.15)",
+                  color: "#fca5a5",
+                }}
+              >
+                🏳️ Give up
+              </button>
+            </Tooltip>
+          </>
+        ) : game.forfeitedBy ? (
+          <>
+            {/* Forfeit resolves instantly — no drumroll, no moves row. */}
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 800,
+                color: game.outcome === "win" ? "#34d399" : "#fca5a5",
+              }}
+            >
+              {iForfeited
+                ? `🏳️ You gave up — ${game.opponentName} wins.`
+                : `🏳️ ${game.opponentName} gave up — you win! 🏆`}
+            </div>
+            <button style={closeBtn} onClick={room.clearMinigame}>
+              Close
+            </button>
           </>
         ) : !revealed ? (
           <>

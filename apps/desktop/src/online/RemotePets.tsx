@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { motion, useSpring } from "framer-motion";
 import { spriteFor, emojiFor, CAT_BABY_LAYERS } from "../game/petSprites";
+import { Tooltip } from "../game/Tooltip";
 import type { RoomApi, RoomMember } from "./useRoom";
 
 // Same cell + display-scale mechanism as GameView (128px cell, sprite drawn
@@ -29,6 +30,7 @@ function RemotePet({
   room,
   busy,
   gameBusy,
+  chessBusy,
 }: {
   member: RoomMember;
   nx: number;
@@ -38,6 +40,7 @@ function RemotePet({
   room: RoomApi;
   busy: boolean;
   gameBusy: boolean;
+  chessBusy: boolean;
 }) {
   const targetX = nx * window.innerWidth - REMOTE_SIZE / 2;
   const targetY = ny * window.innerHeight - REMOTE_SIZE / 2;
@@ -186,58 +189,88 @@ function RemotePet({
             boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
           }}
         >
-          <button
-            title={`Pet ${member.petName}`}
-            style={{ cursor: "pointer", border: "none", borderRadius: 7, padding: "5px 9px", fontSize: 14, background: "rgba(255,255,255,0.12)" }}
-            onClick={(e) => {
-              e.stopPropagation();
-              room.sendSocialPet(member.userId);
-              room.sendEmote("🤗");
-              setMenuOpen(false);
-            }}
+          <Tooltip label={`Pet ${member.petName}`}>
+            <button
+              style={{ cursor: "pointer", border: "none", borderRadius: 7, padding: "5px 9px", fontSize: 14, background: "rgba(255,255,255,0.12)" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                room.sendSocialPet(member.userId);
+                room.sendEmote("🤗");
+                setMenuOpen(false);
+              }}
+            >
+              🤗
+            </button>
+          </Tooltip>
+          <Tooltip label={gameBusy ? "A game is already going" : `Play Rock-Paper-Scissors with ${member.name}`}>
+            <button
+              disabled={gameBusy}
+              style={{
+                cursor: gameBusy ? "default" : "pointer",
+                border: "none",
+                borderRadius: 7,
+                padding: "5px 9px",
+                fontSize: 14,
+                background: "rgba(96,165,250,0.3)",
+                opacity: gameBusy ? 0.4 : 1,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                room.inviteMinigame(member.userId);
+                setMenuOpen(false);
+              }}
+            >
+              🎮
+            </button>
+          </Tooltip>
+          <Tooltip
+            label={
+              chessBusy
+                ? "A chess challenge is already pending"
+                : `Challenge ${member.name} to a chess game`
+            }
           >
-            🤗
-          </button>
-          <button
-            title={gameBusy ? "A game is already going" : `Play Rock-Paper-Scissors with ${member.name}`}
-            disabled={gameBusy}
-            style={{
-              cursor: gameBusy ? "default" : "pointer",
-              border: "none",
-              borderRadius: 7,
-              padding: "5px 9px",
-              fontSize: 14,
-              background: "rgba(96,165,250,0.3)",
-              opacity: gameBusy ? 0.4 : 1,
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              room.inviteMinigame(member.userId);
-              setMenuOpen(false);
-            }}
-          >
-            🎮
-          </button>
-          <button
-            title={busy ? "Battle already in progress" : `Challenge ${member.petName} to a battle`}
-            disabled={busy}
-            style={{
-              cursor: busy ? "default" : "pointer",
-              border: "none",
-              borderRadius: 7,
-              padding: "5px 9px",
-              fontSize: 14,
-              background: "rgba(248,113,113,0.3)",
-              opacity: busy ? 0.4 : 1,
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              room.challenge(member.userId);
-              setMenuOpen(false);
-            }}
-          >
-            ⚔️
-          </button>
+            <button
+              disabled={chessBusy}
+              style={{
+                cursor: chessBusy ? "default" : "pointer",
+                border: "none",
+                borderRadius: 7,
+                padding: "5px 9px",
+                fontSize: 14,
+                background: "rgba(167,139,250,0.3)",
+                opacity: chessBusy ? 0.4 : 1,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                room.chessChallenge(member.userId);
+                setMenuOpen(false);
+              }}
+            >
+              ♟️
+            </button>
+          </Tooltip>
+          <Tooltip label={busy ? "Battle already in progress" : `Challenge ${member.petName} to a battle`}>
+            <button
+              disabled={busy}
+              style={{
+                cursor: busy ? "default" : "pointer",
+                border: "none",
+                borderRadius: 7,
+                padding: "5px 9px",
+                fontSize: 14,
+                background: "rgba(248,113,113,0.3)",
+                opacity: busy ? 0.4 : 1,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                room.challenge(member.userId);
+                setMenuOpen(false);
+              }}
+            >
+              ⚔️
+            </button>
+          </Tooltip>
         </div>
       )}
     </motion.div>
@@ -248,6 +281,9 @@ export function RemotePets({ room }: { room: RoomApi }) {
   if (!room.activeGroup) return null;
   const busy = room.battle !== null || room.outgoingInviteTo !== null;
   const gameBusy = room.minigame !== null || room.outgoingGameInviteTo !== null;
+  // One pending chess challenge at a time; per-pair active-game duplicates
+  // are caught by chessChallenge itself (friendly notice + DB unique index).
+  const chessBusy = room.outgoingChessInviteTo !== null;
   return (
     <>
       {room.members.map((m) => {
@@ -266,6 +302,7 @@ export function RemotePets({ room }: { room: RoomApi }) {
             room={room}
             busy={busy}
             gameBusy={gameBusy}
+            chessBusy={chessBusy}
           />
         );
       })}

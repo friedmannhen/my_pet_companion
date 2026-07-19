@@ -145,6 +145,9 @@ export interface PetSaveData {
   petCount: number;
   throwBallCount: number;
   overfeedCount: number;
+  /** Poops cleaned up (dragged to the trash can). Cloud-synced like the
+   *  other counters — future achievements/statistics will key off it. */
+  poopCleanedCount: number;
   quests?: PetQuestState;
   history?: HistoryEntry[];
 }

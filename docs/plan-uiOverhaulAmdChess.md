@@ -1,5 +1,34 @@
 # Plan: Nested-Drawer UI Overhaul + Chess + Forfeit + Leaderboard Filters
 
+> **Implementation status (2026-07-16): IMPLEMENTED (Phases 0–3).** All code
+> is in place and typechecks; pet-core tests pass (96, incl. new poop.test.ts);
+> Phase 0/0.5 flows verified empirically in the browser-preview mock (panel
+> split, kitchen-stays-open drag-throw, poop spawn→drag→trash→counter+reward,
+> framer idle breathing, radial outside-click backdrop, leaderboard pills).
+> **Not yet done:**
+> - `supabase db push` for the two new migrations
+>   (`20260716000000_poop_cleaned_count.sql`, `20260716010000_chess_games.sql`)
+>   — gated on explicit go-ahead. **Until pushed, every pets-row sync fails**
+>   (the client now writes `poop_cleaned_count`) and chess can't start.
+> - Two-account online verification (forfeit flows, full chess game,
+>   spectating, poke deep-link, mutual-cancel) — needs the push first, then
+>   two real sessions (verification items 4–9 below).
+> - Update-toast live check needs a real packaged build (verification item 10).
+> Deviations from the letter of the plan, all deliberate:
+> - Poop drop uses a native window `pointerup` as the release trigger of
+>   record (framer's `onDragEnd` is unreliable — the codebase's own
+>   documented rule), with an id-guard against double-fires.
+> - Chess resign/cancel go through SECURITY DEFINER RPCs
+>   (`resign_chess_game`, `cancel_chess_game`) because the RLS update policy
+>   enforces `current_turn = auth.uid()` and resigning must work off-turn.
+> - `result_reason` also allows `'draw'` (stalemate/insufficient material —
+>   chess.js can produce it; recorded as a tie for both).
+> - The challenger (white/player_a) inserts the `chess_games` row on
+>   receiving the accept, then broadcasts `start` with the game id.
+> - A DEV-only `window.__mpc` hook (toggleDock/toggleMenu/spawnPoop) exists
+>   for the browser-mock technique — framer `onTap` never fires from the
+>   preview pane's synthetic clicks (verified against unmodified baseline).
+
 Big scope across 4 phases, ordered per your call (UI restructure → small wins → Chess last). No new physics/rendering library — framer-motion springs already in the codebase are enough (drawer spring `stiffness:300/damping:32`, radial-menu stagger `stiffness:320/damping:22`); this whole plan is architecture-first since art assets aren't ready yet.
 
 **Phase 0 — Nested "closet of drawers" UI restructure**
@@ -12,6 +41,10 @@ Big scope across 4 phases, ordered per your call (UI restructure → small wins 
 5. *Depends on 1-4.* Reskin pass deferred — this phase intentionally keeps current placeholder visuals; book-style (image 1) vs wood/vine (image 2/3) art is a separate follow-up once assets exist.
 6. **New tweak (your addition): room presence count display.** Replace the current per-player repeated green-dot badge (`"🟢".repeat(...)` in [SideDock.tsx](apps/desktop/src/game/SideDock.tsx) ~L156-166, fed by `useGroupPresenceCount`) with a single `{count} 🟢` numeric + online-icon format in the same spot — rendering change only, no new data plumbing needed.
 7. **Idle liveliness — framer-motion breathing + random gestures** (your addition; off-topic from the drawer work itself, but same no-new-art spirit so it fits this phase). Today's idle breathe is a plain CSS keyframe (`pet-anim-idle-breathe` in [petAnimations.css](apps/desktop/src/game/petAnimations.css), gated by the `idleBreathing` boolean in [GameView.tsx](apps/desktop/src/game/GameView.tsx) ~L1580-1591: pet alive, hatched, not sleeping/moving/busy, no other pulse active). **Decision (picking for best future scaling): move to framer-motion**, not just for breathing but as the single animation authority for all future idle gestures too — drive the breathing squash with a `scaleY` loop via `animate()`/`useAnimationControls` with `repeatType:"mirror"` (same technique already used in [throwPhysics.ts](apps/desktop/src/game/throwPhysics.ts)/[curlPhysics.ts](apps/desktop/src/game/curlPhysics.ts)), using the exact same gating condition. **Required guard rail (closes a real integration risk):** all the other pet states (`pet-anim-walk`, `pet-anim-eat`, `pet-anim-happy`, etc.) are still plain CSS classes that set `transform` via keyframes on the same element; a framer-motion-driven inline `transform`/`scaleY` style persists on that DOM node and will silently keep overriding those CSS classes once `idleBreathing` turns false unless explicitly cleared. So the moment the `idleBreathing` gate flips off, the code must stop the animation controls AND reset the motion value back to its rest state (`scaleY.set(1)`, or unset the inline style entirely) before handing the element back to `bodyClass`. Layer on top a randomized "liveliness" scheduler, also framer-motion-driven for the same reason (interruptible one-offs compose more easily than stacking more CSS keyframe classes as gestures grow richer later): while `idleBreathing` is true, fire one small one-off gesture every ~6-20s at random (ear/tail twitch, a quick blink via the existing wink/blink asset swap, a brief look-around tilt), each gesture also resetting its own motion value on completion. No new art required for v1 (blink/wink assets already exist); richer gestures wait for future pet art.
+
+**Phase 0.5 — Two small standalone UX fixes (your addition, unrelated to the drawer work but same "small" spirit)**
+7a. **Update-available notice is too easy to miss.** Today [useAppUpdate.ts](apps/desktop/src/game/useAppUpdate.ts) only surfaces a quiet "vX.Y.Z" footer + restart button once `updateState === "ready"`, tucked inside the Settings panel — a player who never opens Settings can sit on a stale build indefinitely. Fix: the moment `updateState` flips to `"ready"`, also push it through the existing pet notification/toast system ([useNotifications.ts](apps/desktop/src/online/useNotifications.ts), rendered the same as friend-request/room-invite toasts in [GameView.tsx](apps/desktop/src/game/GameView.tsx) ~L2116-2147) as a new **local-only** `NotificationKind: "update_ready"` — local-only meaning it's synthesized directly from `appUpdate.updateState` on this client, never sent via the `sendTo`/broadcast path the other kinds use. Two differences from a normal toast, both because a missed update matters more than a missed friend request: (1) it does **not** auto-clear after the normal `TOAST_TTL_MS` (6s) — it only goes away via an explicit "Dismiss" button, so the player is guaranteed to have actually seen it; (2) the toast itself is directly actionable with an "Update now" button that calls `appUpdate.installUpdate()` right there (no need to hunt for the Settings panel), plus a secondary "Later" / dismiss action that just closes the toast (the quiet footer + button in Settings stay as a fallback). Also add a small persistent badge on the collapsed ribbon tab (same affordance already planned for item 18's "ongoing chess game" badge) while `updateState === "ready"` and the toast has been dismissed, so the pending update stays visible instead of being forgotten entirely once the toast is gone.
+7b. **Pet action (radial) menu doesn't collapse on an outside click.** Today `menuOpen` in [GameView.tsx](apps/desktop/src/game/GameView.tsx) only closes via a second click directly on the pet or a handful of specific call sites (choosing an action, sleep, entering a minigame, etc.) — clicking anywhere else on screen does nothing, and actually can't today: outside the pet's own hitbox the overlay window is normal OS-level click-through (per [useHitTest.ts](apps/desktop/src/overlay/useHitTest.ts)'s cursor-poll model), so a click on, say, the desktop behind the pet never even reaches the renderer to be handled. Fix: while `menuOpen` is true, use the same escape hatch [clickableOverride.ts](apps/desktop/src/overlay/clickableOverride.ts) already provides for feed-throw/scrub to force `window.overlay.setClickable(true)` for the whole window, and render a full-window transparent backdrop (z-order below the pet/`RadialMenu`, marked `data-interactive`) whose `onClick` sets `menuOpen(false)`; the pet's own click handler and each radial action must `stopPropagation` so choosing an action doesn't also fire the backdrop's close. The override must be released the instant `menuOpen` goes false so normal cursor-driven click-through resumes — leaving the whole window stuck clickable would be the same class of bug `useHitTest.ts`'s resync comment already warns about, just in the opposite direction.
 
 **Phase 1 — Universal forfeit/give-up button** *(parallel with Phase 2, both small)*
 8. Add a `forfeit` broadcast kind in [useRoom.ts](apps/desktop/src/online/useRoom.ts) (alongside existing `challenge`/`invite`/`decline` patterns ~L786-845), with handlers that resolve the match as a loss for the quitter + win for the opponent, and call `record_minigame_result` accordingly. This "Give up" path always produces a decisive result (one player's loss, the other's win) — it's the only forfeit route for RPS/Target Toss, which resolve in seconds and don't need anything more.
@@ -58,8 +91,10 @@ Grounded in the existing economy (quests/achievements/care-points/decay) and the
 - New: `supabase/migrations/2026xxxx_poop_cleaned_count.sql` — adds the `pets.poop_cleaned_count` column + grants
 - `supabase/migrations/20260713010000_minigame_scores.sql` — leaderboard filter source; RLS template for new chess table
 - `apps/desktop/src/online/RemotePets.tsx` — opponent pet-as-king sprite reuse
-- `apps/desktop/src/online/useNotifications.ts` — poke button's toast delivery + `chess_poke` kind + deep-link handling
+- `apps/desktop/src/online/useNotifications.ts` — poke button's toast delivery + `chess_poke` kind + deep-link handling; new local-only `update_ready` kind
 - New: `supabase/migrations/2026xxxx_chess_games.sql` — uses `is_group_member(group_id)` for spectator SELECT (not `shares_group_with`), plus the one-active-game-per-pair partial unique index
+- `apps/desktop/src/game/useAppUpdate.ts` — source of the `update_ready` toast trigger + `installUpdate()` wired directly to the toast's action button
+- `apps/desktop/src/overlay/clickableOverride.ts`, `apps/desktop/src/overlay/useHitTest.ts` — reused override + resync pattern for the outside-click-collapses-radial-menu backdrop
 
 **Verification**
 1. Phase 0: manually drag Kitchen open while an info panel is open — confirm both hit-test regions remain clickable and click-through still works everywhere else (retest the documented resync-after-override bug scenario).
@@ -71,11 +106,15 @@ Grounded in the existing economy (quests/achievements/care-points/decay) and the
 7. Phase 3: mutual-cancel a game from both sides — confirm no `record_minigame_result` call fires for either player and `minigame_scores` is untouched; separately, verify a spectator (third account, not a player) actually gets SELECT access via `is_group_member`, not silently blocked by the old `shares_group_with` mistake.
 8. Phase 3: start two concurrent chess games in the same room (different pairs) — confirm the room-card picker lists both and a third player can pick which to spectate.
 9. Phase 3: the poke button's toast reaches an opponent who minimized/left the room, and tapping it actually switches them into the right room and restores that specific board.
+10. Phase 0.5: trigger an update while the app is running (or point the auto-updater at a bumped test version) — confirm the `update_ready` toast appears, survives past 6s without the normal TTL auto-dismiss, "Update now" actually installs, "Dismiss" clears it, and the ribbon badge persists after dismiss until the update installs.
+11. Phase 0.5: open the radial menu, click on an empty part of the screen away from the pet/menu — confirm it collapses; then confirm clicking a radial action still fires that action (not swallowed by the new backdrop) and that normal cursor-driven click-through resumes immediately after the menu closes (window isn't stuck fully clickable).
 
 **Decisions**
 - No physics/rendering library added — framer-motion only, per your call.
 - Chess ships **untimed-only** for v1 — the clock/time-bank mode is dropped (was "both from day one", revised per your follow-up).
 - Chess trust model: client-validated + DB turn-ownership RLS only for MVP; full server-side re-validation deferred as hardening follow-up.
+- Update-ready notice must require an explicit dismissal (no silent TTL auto-expiry) and is directly actionable ("Update now" installs right from the toast) rather than just pointing at Settings.
+- The radial/action menu's outside-click-to-collapse reuses the existing capture-mode override (not a new mechanism), and must release it the moment the menu closes.
 - Forfeit excludes Battle by your choice.
 - `poopCleanedCount` syncs to the cloud pets row from day one (achievements/stats will depend on it later) — not local-only.
 - Poop cleanup is only possible post-hatch; eggs can't poop.

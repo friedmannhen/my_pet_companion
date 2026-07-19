@@ -16,7 +16,9 @@ description: >
   feedPhase / ballPhase, the radial menu's Stay / Free Roam / Follow Me
   buttons, the Settings view's Follow Me speed picker, click-through /
   overlay clickability bugs ("clicks aren't registering", "menu is stuck",
-  "need to close and reopen to interact"), or before making ANY change to
+  "need to close and reopen to interact"), adding/auditing hover tooltips
+  (this app has a strict house rule: always use the shared `Tooltip`
+  component, never a bare `title=` attribute), or before making ANY change to
   useConsumables.ts's takeFood/takeBall/returnBall — a proven-broken pattern
   is documented below and must not be reintroduced even by accident.
 ---
@@ -41,17 +43,74 @@ been wrong multiple times in ways that took real debugging to uncover.
   somewhere and await arrival), and the Follow-Me cursor-chase rAF loop
   (`following`/`followSpeed` options — see "Movement" below).
 - `useGamePrefs.ts` — persisted local prefs: sound, `movementMode`
-  ("free"/"static" — the Stay/Free-Roam toggle), `followSpeed`
-  ("slow"/"normal"/"fast", set from the Settings view, consumed by the
-  Follow-Me loop).
-- `SideDock.tsx` — the drawer UI: food pile spans, the ball span, the
-  sponge. These are just trigger elements (`onPointerDown`) — the actual
-  animated food/ball live in GameView as always-mounted, always-rendered
-  `motion.div`s positioned purely via motion values.
+  ("free"/"static" — the Stay/Free-Roam toggle; `setMovementMode` exists
+  for direct sets, used by Send Home), `followSpeed`, `hudScale`
+  ("sm"/"md"/"lg"/"xl" → `HUD_SCALE_FACTORS`, scales ONLY the SideDock
+  subtree), and `petScale` (100/90/80/70 — shrink-only multiplier on the
+  pet's display scale).
+- `SideDock.tsx` — the MULTI-RIBBON dock (fourth pass, late Jul 2026, after
+  a further round of user feedback on iteration 3): the active tab is
+  highlighted by background/opacity ONLY now — the earlier ±5px "fused"
+  x-offset on the active tab was removed (read as "losing connection with
+  the window"); ribbon tab BUTTONS are plain `<button>`s again (only the
+  8-secondary-tabs' entrance stagger still uses a `motion.div` wrapper for
+  the AnimatePresence slide-in — the buttons themselves no longer need
+  `motion.button`). Secondary panels no longer have a "✕" close button
+  (redundant — the tab itself, or the Home tab, is the way back). Tooltip
+  placement is now simply `isRight ? "left" : "right"` — ALWAYS the
+  interior side opposite whichever edge the dock is docked to, independent
+  of open/collapsed state (an earlier open-state-dependent formula hung
+  tooltips off-screen in some configurations). The Home tab also carries a
+  🪺 badge (opposite corner from the chess-games badge) whenever
+  `petNested` is true, so a hidden pet is never silently forgotten while
+  the ribbon is collapsed. The ACTIVE tab (Home or whichever secondary tab)
+  now grows `TAB_ACTIVE_GROW` (10px) wider instead of using background
+  alone — since the column's flex alignment anchors the panel-facing edge
+  (`alignItems: flex-end`/`flex-start` per side), growing `width` only
+  extends the FREE (rounded, screen-interior-facing) edge outward, so it
+  reads as "popped out/stretched" while staying visually fused to the
+  panel — a plain CSS `transition: "width 0.18s ease"` handles the
+  animation (no framer motion value needed, unlike the earlier x-offset
+  attempt this replaced).
+- `SideDock.tsx` (third iteration, for context) — the MULTI-RIBBON dock
+  after user feedback on the stacked-panels version): COLLAPSED shows only
+  the 🏠 Home tab docked at the screen edge (the original single-ribbon
+  look, draggable vertically, anchor `y` persisted). Opening slides out
+  exactly ONE panel flush with the edge, with the whole tab column FUSED to
+  the panel's inner side (rounded away from the panel, active tab shares
+  PANEL_BG + protrudes ~5px — reads as physically attached); the other 8
+  tabs (quests/awards/ranks/groups/friends/history/petstats/settings)
+  STAGGER IN one by one (AnimatePresence, ~45ms delay steps, from the panel
+  side). STRICT one-panel-at-a-time INCLUDING Home: `activePanel === null`
+  = Home content (name/status header with the `[data-homeslot]` nest slot,
+  4 stat bars, the ENTIRE Kitchen & toy box incl. `[data-trashcan]`, and
+  the version footer); any other id swaps the same panel's body in place
+  (a secondary panel's ✕ goes BACK to Home, not closed). Tab semantics:
+  Home opens (resetting to Home content) / switches back to Home / closes;
+  a secondary tab toggles itself (same tab again → Home). The column's
+  x AND y are IMPERATIVE motion values (`animate(tabX/tabY, ...)`) — not
+  animate-props — so the first paint is already correct; open aligns the
+  column with the clamped `openY` (auto-shift keeps panel+column fully
+  on-screen; the dragged anchor is never rewritten); collapsed drag is
+  enabled only while closed (`drag={open ? false : "y"}`, `draggingRef`
+  suppresses drag-tail clicks). Ribbon tooltips use the Tooltip component's
+  side placements ("right" over the panel while open, interior-facing while
+  collapsed) — the top-centered default clipped off the screen edge. The
+  whole subtree sits in ONE fixed inset-0 wrapper applying the HUD scale
+  via `transform: scale()` (containing-block mechanic, deliberate); layout
+  math divides by the factor (`localVH`) to stay on the real screen. The
+  pile/ball/sponge spans are still just trigger elements handing off to
+  GameView's always-mounted flying items; grabbing food/ball closes
+  nothing.
+- `useRibbonPrefs.ts` — persisted dock side + collapsed anchor `y` +
+  `activePanel`. `kitchenOpen` is GONE (the Kitchen lives inside Home now).
+  Local-only, never synced.
 - `overlay/clickableOverride.ts` + `overlay/useHitTest.ts` — the
   click-through toggling system. See "Click-through overlay model" below —
   this is the #1 source of "why isn't my new drag gesture receiving mouse
   events" bugs.
+- `Tooltip.tsx` — the shared hover-tooltip component; see the RULE section
+  below. Used everywhere a `title=` attribute would otherwise have gone.
 
 ## Click-through overlay model — read this before adding ANY new drag gesture
 
@@ -141,6 +200,191 @@ re-abandon drag-throw for a click-only design if it seems flaky; check the
 4. **A near-zero release velocity (`speed < 60`) falls back to a random
    nearby auto-toss** rather than requiring a real flick every time — keeps
    "just click it" working as a lighter-weight action.
+
+## Poop cleanup (Jul 2026 plan Phase 0)
+
+Post-hatch only — `shouldSpawnPoop(isEgg, onScreenCount)` in pet-core's
+`poop.ts` gates on `isEgg` and an on-screen cap (numbers in `POOP_RULES`,
+tunable placeholders). Flow: `throwFood`'s eat step calls
+`schedulePoopSpawn()` → random delay → pet does a transient wiggle
+(`petPoopWiggling`, reuses `egg-anim-wiggle`) → poop `motion.div` slides/
+fades in just below the pet. The poop uses NATIVE framer drag (cursor stays
+over the data-interactive element the whole drag, so no clickable-override
+needed), but the DROP trigger of record is a native window `pointerup`
+attached synchronously in its `onPointerDown` — framer's `onDragEnd` proved
+unreliable again (same class as the feed/ball findings); `dropPoop(id,x,y)`
+is id-guarded so the native trigger and a late `onDragEnd` can't
+double-clean. Drop hit-test is the Kitchen panel's `[data-trashcan]` rect —
+the SAME rect is also polled continuously during `onDrag` (not just on
+release) via `isOverTrash()`, feeding a `poopOverTrash` boolean up to
+SideDock as the `poopHoverTrash` prop so the trash can itself enlarges
+(framer spring scale on the 🗑️ emoji) and glows while a poop is dragged
+directly over it — makes the correct drop target obvious before release.
+The poop's `motion.div` z-index is 25500 (ABOVE the Kitchen drawer's own
+25000) — it was 15000 until Jul 2026, which put the dragged poop visually
+BEHIND the open Kitchen drawer even though the drop logic worked fine; if
+you ever bump SideDock's panel z-indices, re-check this one stays higher.
+Reward: `game.cleanPoop()` — small happiness + care points via the normal
+careAction path, increments the cloud-synced `poopCleanedCount` counter
+(full petRow/migration plumbing, mirrors feed_count). Uncleaned poops are
+session-only; they clear if the pet regresses to an egg.
+
+## Idle liveliness — framer-motion breathing + gestures (Jul 2026)
+
+Idle breathing is NO LONGER the `pet-anim-idle-breathe` CSS class on
+bodyClass (the class still exists in petAnimations.css — the chess board's
+pet-kings use it). GameView drives `breatheScaleX/breatheScaleY/
+gestureRotate` motion values on a DEDICATED wrapper node nested inside the
+display-scale wrapper, so they can never fight bodyClass's CSS keyframes or
+the scale spring. A scheduler fires a random one-off gesture every ~6–20s
+(blink via the existing asset swap, quick head-shake, slow look-around
+tilt). GUARD RAIL (do not remove): the effect's cleanup stops every
+animation AND resets all three motion values to rest the instant
+`idleBreathing` flips false — a lingering inline transform would silently
+override the walk/eat/happy CSS states.
+
+## Send Home + pet z-order (late Jul 2026)
+
+- **Send Home** (quiet-time feature): the shared `enterNest(speedPxPerFrame?)`
+  helper is the single source of truth for "walk the pet/egg onto
+  `[data-homeslot]` and tuck it in" — it looks up the slot rect, forces
+  `movementMode: "static"`, sets `sentHome`, `movement.walkTo()`s there,
+  and — if Send Home wasn't cancelled meanwhile (`sentHomeRef` check) —
+  flips `petNested` true on arrival. TWO entry points share it:
+  1. Radial 🏠 action (`sendHome`): opens the dock, FORCES it onto the Home
+     tab (`ribbon.setActivePanel(null)` — the slot only exists in Home
+     content; this is what fixed "Send Home did nothing while viewing
+     Quests"), waits ~500ms for the panel slide-in, then calls
+     `enterNest()` at the normal walk speed.
+  2. **Drag-and-drop onto the slot** (`petDragHandlers.onDragEnd`): if the
+     pet/egg is released within `NEST_DROP_RADIUS` (90px, center-to-center)
+     of the slot, calls `enterNest(18)` (a quick snap, skipping the normal
+     glide-settle) instead of `movement.dragHandlers.onDragEnd()`. This is
+     the ONLY way to send an EGG home (eggs have no radial action — the
+     egg's `radialActions` branch is just `canHatch ? [Evolve!] : []`) and
+     a second entry point for a hatched pet. Requires the Home panel
+     already visible (same precondition as the trash-can poop-drop
+     hit-test) — dragging toward a closed dock just falls through to the
+     ordinary glide. **Known easily-tripped test gotcha, not a real bug**:
+     starting a SECOND drag while a `walkTo` from a first drop is still in
+     flight cancels `sentHome` (via `onDragStart`) without stopping the
+     walk's rAF loop, so the pet can end up parked exactly on the slot
+     without ever actually nesting — don't interleave test actions with an
+     in-flight drop-to-nest walk.
+  3. **Drop-zone hover highlight** (Jul 2026 round 4, mirrors the trash
+     can's `poopHoverTrash`): `petOverNest` (GameView state) drives
+     SideDock's `petHoverNest` prop, enlarging/glowing the nest slot (scale
+     1.35, solid green ring + inset glow) while the pet/egg is dragged
+     directly over it, same as the trash can already did for poop. Driven
+     by `useMotionValueEvent(movement.x/y, "change", cb)` gated by an
+     `isDraggingRef` (true between `onDragStart`/`onDragEnd`) — **not** a
+     custom `onDrag` handler and **not** an `requestAnimationFrame` poll.
+     Both alternatives were tried and both failed in the browser-preview-
+     mock pane specifically because that pane's tab is permanently
+     `document.hidden`/unfocused, which fully suspends
+     `requestAnimationFrame` (confirmed: a bare rAF loop ticks zero times
+     over 2 real seconds there) — see the quests-testing skill's expanded
+     pane-limitations section for the full writeup. `useMotionValueEvent`
+     works there (and everywhere else) because `MotionValue.set()` notifies
+     "change" subscribers synchronously, independent of the frame
+     scheduler. **If you ever need to react to the pet's position DURING a
+     drag again, reach for `useMotionValueEvent`, not `onDrag`/rAF** — it's
+     also simpler and doesn't need its own start/stop plumbing.
+  4. **Egg sprite in the nest**: `CAT_SPRITES[0]` (`petSprites.ts`) was
+     added specifically for this — stage 0 (egg) previously had no entry,
+     so `NestedPetSprite` fell back to a plain 🐱 emoji even when an EGG was
+     nested. This is intentionally the ONLY caller that ever asks for stage
+     0 art: `spriteFor()` is also called from every online/remote context
+     (Chess, RPS, Toss, RemotePets), but eggs can never go online (product
+     rule, see the pet-game-online skill), so those call sites are
+     unaffected by this addition.
+  Once nested: the ROAMING PET HIDES (display-scale wrapper animates
+  scale→0 + opacity→0, stays hidden even with menus closed), and —
+  critically — **the pet's outer container gets `pointerEvents: "none"`**
+  (not just the inner sprite wrapper). Without that, the container's real
+  screen position is the nest slot (inside the Home panel), and even fully
+  invisible it stayed hit-testable at a HIGHER z-index than the dock
+  (Part G), silently swallowing clicks meant for the ribbon tabs or
+  whichever panel sat under it. Two toasts living inside the same
+  container (`update_ready`, the friend/room/chess notification bubble)
+  explicitly re-declare `pointerEvents: "auto"` so they stay usable
+  regardless. The slot shows the pet's own idle asset (`NestedPetSprite`,
+  breathe class) instead of the 🪺 placeholder — for an EGG specifically,
+  `spriteFor("cat", 0)` returns null (no egg entry in `CAT_SPRITES`), so
+  `NestedPetSprite` falls back to its plain-emoji branch (🐱), not an
+  `<img>` — expected, not a bug. **Release paths**: clicking the slot
+  (`onWakeFromNest`), OR grabbing food/ball while nested (`grabFood`/
+  `grabBall` call `wakeFromNestRef.current()` unconditionally — no-ops via
+  `petNestedRef` if not nested) — the exit plays concurrently with the
+  throw, and the pet's own walkTo-to-eat at the end carries it clear of
+  the nest. Cleaning (`canClean`) and, for an egg, warming (`canWarm`) are
+  both explicitly BLOCKED while nested (`!petNested` in both) — doesn't
+  make sense to scrub/warm something hidden. Free Roam/Follow Me/drag/
+  "Come out" also clear both flags. `wakeFromNest` sets `petExitingNest`
+  for ~650ms, adding `egg-anim-wiggle` to bodyClass on top of the scale-up
+  spring already driven by `petNested` flipping false, so exiting reads as
+  "growing back + wiggling out" rather than an instant pop. Nothing here
+  sets petBusy — walkTo's 6s watchdog is the only timer, so no lockup
+  class. `enterNest`/`wakeFromNest` are declared BEFORE `petDragHandlers`
+  but `wakeFromNest` is declared AFTER grabFood/grabBall, so those call it
+  via `wakeFromNestRef.current()` (forward-reference-by-ref, the file's
+  existing `throwFoodRef` pattern) — never call it directly from an
+  earlier-declared callback.
+
+- **Cleaning/warming cursor z-index** (late Jul 2026 fix): the sponge
+  cursor, its 🫧 bubbles, and the warm-lamp glow all render at
+  `ABOVE_PET_Z` (25300) / `ABOVE_PET_Z - 1` — comfortably above the pet
+  container's own max (25200, Part G). Before this fix they sat at the
+  older 21000-ish tier, which was fine when the pet rendered BELOW the
+  dock but left the sponge/lamp visually BEHIND the pet's body once Part G
+  elevated the pet above 25000 — any new cursor/particle effect meant to
+  render "on top of the pet" must use `ABOVE_PET_Z`, not a hand-picked
+  z-index, or it'll silently regress the same way.
+- **Pet z-order**: the pet container renders ABOVE the dock in normal play:
+  `zIndex: burst ? 945 : inMinigame ? undefined : menuOpen ? 25200 : 25100`.
+  Dock wrapper = 25000, dragged poop = 25500, food/ball = 26000, Chess
+  panel 21500 / Toss arena 22000 (the pet correctly hides behind minigames
+  via the `inMinigame` fallback). Known flagged tradeoff: where the pet
+  visually overlaps an open dock panel, useHitTest's elementFromPoint
+  resolves the PET — only mitigate if it proves a real nuisance.
+
+## Radial menu outside-click collapse (Jul 2026)
+
+While `menuOpen` is true, GameView holds the same capture-mode override
+feed/scrub use (`setClickableOverride(true)` + whole-window clickable) and
+renders a full-window transparent backdrop at zIndex 100 whose click closes
+the menu; the pet container elevates to zIndex 500 so pet/radial clicks
+never fall through. THE HANDOFF FOOTGUN: the menu effect's cleanup only
+releases the override when `captureBusyRef` (feed/ball/scrub/warm phases)
+says nothing else owns it — grabbing food closes the menu as part of
+starting its OWN override, and an unconditional release there would kill
+that drag mid-gesture. useHitTest's post-override resync then restores
+normal click-through on the next tick.
+
+## RULE: hover tooltips always use `<Tooltip>`, never a bare `title=` (Jul 2026)
+
+`apps/desktop/src/game/Tooltip.tsx` is the ONLY way to show a hover hint
+anywhere in this app — never add a native `title="..."` attribute to a DOM
+element. The native browser/OS tooltip is slow, unstyled, and (in a
+click-through overlay where most surfaces are hidden until you're already
+hovering something interactive) easy to forget is even there; `<Tooltip
+label="...">{element}</Tooltip>` gives every hint the same themed,
+fast-fading look.
+
+Why it's a `cloneElement` wrapper and not a wrapping `<span>`: several
+existing tooltip targets are themselves `position: absolute` (the sync-dot/
+update/chess/claimable badges anchored to the SideDock tab button, the
+poop-drag hint, etc.) — introducing a new `position: relative` wrapper
+around them would silently change what they're positioned relative to.
+`Tooltip` instead clones the single child, attaches a ref +
+onMouseEnter/onMouseLeave/onPointerDown (merged with any handlers the child
+already had), and renders the floating label as a separate `position:
+fixed` element positioned from the child's own `getBoundingClientRect()` —
+zero layout impact. The label itself is always `pointerEvents: "none"`, so
+it's invisible to `useHitTest`'s `document.elementFromPoint` poll and never
+needs `data-interactive`. A falsy `label` (undefined/null/"") renders the
+child with no tooltip at all, matching how `title={maybeUndefined}` used to
+just no-op.
 
 ## Ballistic arc throw physics + squash-and-stretch
 
@@ -325,6 +569,21 @@ friction decay via `apps/desktop/src/game/curlPhysics.ts` (`slidePuck`/
 `slideDistance`/`slideDuration`) — a deliberate separate mechanic, not a
 fork, chosen so the drag-aim preview line IS the travel line.
 
+## Food-cancel didn't return the piece (fixed Jul 2026)
+
+`cancelBall` always called `consumables.returnBall()` when canceling a
+held-but-never-thrown ball, but `cancelFeed`'s equivalent didn't exist —
+`useConsumables.ts` had `takeFood(slot)` (starts the 5-min respawn timer)
+with no counterpart to undo it. Right-click-cancelling a food grab mid-hold
+left the pile slot stuck on the full 5-minute countdown even though the
+piece was never thrown or eaten. Fixed by adding `returnFood(slot)`
+(resets that slot's respawn timestamp to `0`, symmetric to `returnBall`)
+and a `grabbedFoodSlotRef` in GameView.tsx (grabFood records which slot,
+cancelFeed reads it back) — mirrors the ball path exactly. **If you add a
+third grab-able consumable with its own "held" cancel path, give it the
+same take/return pair; a `take*` that starts a timer/flag with no `return*`
+counterpart is the bug shape to avoid.**
+
 ## Quick-reference gotcha list
 
 - Never trust a `setState` updater's side-effect return value synchronously
@@ -354,3 +613,5 @@ fork, chosen so the drag-aim preview line IS the travel line.
   `!followingActive`), not the hook itself. If you add a third movement
   driver (another rAF loop touching `x`/`y`), gate it the same way at the
   call site rather than teaching the hook about every combination.
+- Never add a bare `title="..."` for a hover hint — wrap the element in
+  `<Tooltip label="...">` (`apps/desktop/src/game/Tooltip.tsx`) instead, app-wide, no exceptions.

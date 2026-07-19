@@ -32,6 +32,10 @@ export interface Consumables {
   /** Ms until the given slot respawns (0 when ready). */
   foodEtaMs: number[];
   takeFood: (slot: number) => boolean;
+  /** Undoes a takeFood() that was never actually thrown (grab canceled
+   *  mid-hold) — puts the slot's respawn timer back to "available now"
+   *  instead of leaving it stuck on the full 5-minute countdown. */
+  returnFood: (slot: number) => void;
   ballReady: boolean;
   takeBall: () => boolean;
   returnBall: () => void;
@@ -83,6 +87,15 @@ export function useConsumables(): Consumables {
     return true;
   }, []);
 
+  const returnFood = useCallback((slot: number) => {
+    const prev = foodRespawnAtRef.current;
+    if (slot < 0 || slot >= prev.length) return;
+    const next = [...prev];
+    next[slot] = 0;
+    foodRespawnAtRef.current = next;
+    setFoodRespawnAt(next);
+  }, []);
+
   const takeBall = useCallback((): boolean => {
     if (ballOutRef.current) return false;
     ballOutRef.current = true;
@@ -107,6 +120,7 @@ export function useConsumables(): Consumables {
     foodReady: foodRespawnAt.map((t) => t <= now),
     foodEtaMs: foodRespawnAt.map((t) => Math.max(0, t - now)),
     takeFood,
+    returnFood,
     ballReady: !ballOut,
     takeBall,
     returnBall,

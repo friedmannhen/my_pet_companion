@@ -91,6 +91,13 @@ applies the bonus, earning alone does not.
 - Overfeed penalty: `-5` care points + `-5` happiness. Egg overheat penalty
   (after a 1s grace window, `eggOverheat.graceMs`): `-0.5` care points/tick +
   `-1` happiness/tick.
+- Poop cleanup (Jul 2026, `poop.ts`'s `POOP_RULES` — tunable placeholders):
+  35% spawn chance per feed, 3 max on screen, cleaning grants `+3` happiness
+  and `2` base care points (wash-category achievement bonus applies) via the
+  normal careAction path — deliberately smaller than a full feed/wash/pet.
+  Counter `poopCleanedCount` is cloud-synced for future achievement tiers
+  (no achievement definition exists yet). Eggs never poop (gated in
+  `shouldSpawnPoop`, unit-tested in poop.test.ts).
 
 ## Part 2: Empirical debugging via the browser-preview-mock technique
 
@@ -168,6 +175,74 @@ just typechecking.**
    just log-line counts.
 8. When done, `preview_stop` the server — it's a debugging-only setup, not
    part of the shipped app.
+
+### Preview-pane environment limits discovered Jul 2026 (work around, don't chase)
+
+Found while verifying the nested-drawer overhaul; all confirmed against the
+UNMODIFIED baseline too, so none of these are app bugs:
+
+- **framer-motion `onTap` never fires from preview-tool clicks** (both
+  ref-based `computer` clicks and synthetic PointerEvent sequences). Use
+  the DEV-only `window.__mpc` hook GameView installs (`toggleDock()`,
+  `toggleMenu()`, `spawnPoop(x?, y?)`) to drive that state instead. Plain
+  React `onClick` buttons work fine with any click style — and since the
+  multi-ribbon redesign the dock's 9 ribbon tabs ARE plain onClick buttons,
+  so the dock can also be driven by clicking them directly.
+- **Declarative animate-PROP animations are frozen at their `initial`
+  values in this pane** (drawer slide, panel fade-ins, RadialMenu pop —
+  all stuck at opacity 0 / initial x), while imperative `animate()` calls,
+  `useSpring`, and drag physics all run normally. Consequence 1: check
+  STATE-level evidence (element mounted, localStorage, rects), never
+  "is it visible". Consequence 2: `AnimatePresence` exits never complete,
+  so "closed" panels stay in the DOM — check the driving state, not
+  innerText. In the real Electron app these animate fine.
+- **`document.body.innerText` includes off-screen/transformed content and
+  uppercases `text-transform: uppercase` headings** — match
+  case-insensitively and don't treat "text present" as "visible".
+- **Synthetic drags process at the pane's throttled rAF rate** — space the
+  pointermoves out (~100ms+) and repeat the final position a few times
+  before pointerup, or the release registers mid-path.
+- **Root cause of the above, confirmed Jul 2026**: this pane's tab reports
+  `document.hidden === true` and `document.hasFocus() === false` at all
+  times (verified directly — `tabs_context`'s `isActive: true` doesn't
+  change this), which makes Chrome fully suspend
+  `requestAnimationFrame` — a raw rAF loop ticked **zero** times over 2 real
+  seconds. This has two concrete, previously-misdiagnosed consequences:
+  1. **`usePetMovement`'s own `walkTo` (rAF-driven step loop) never
+     advances in this pane** — Send Home / feed / evolve sequences that
+     call it will sit still until its 6s watchdog teleports the pet to the
+     target (already documented above), not because the app is slow but
+     because the step loop's `requestAnimationFrame(step)` is frozen.
+  2. **framer-motion's drag-gesture `onDragEnd` callback never fires in
+     this pane**, even though the raw pan mechanics (position tracking
+     during `pointermove`) work perfectly and `onDragStart` fires reliably
+     every time — position updates are applied synchronously per raw
+     pointer event, but the drag's *end-of-gesture* completion is
+     apparently scheduled through framer's internal frame loop, which is
+     just as frozen as any other rAF consumer. **This was misdiagnosed once
+     already** as "adding a custom `onDrag` handler kills the PanSession" —
+     that was wrong; removing the custom `onDrag` entirely did not fix it,
+     because the real cause is this pane's frozen rAF, not the handler.
+     Practical fix for anything that needs to react to position *during* a
+     drag (e.g. a drop-target hover highlight): use
+     `useMotionValueEvent(motionValue, "change", cb)` instead of `onDrag` or
+     an rAF poll — `MotionValue.set()` notifies "change" subscribers
+     **synchronously**, not through the frame scheduler, so it fires
+     correctly even with rAF fully suspended (confirmed live: the nest
+     drop-zone's hover highlight lit up correctly mid-synthetic-drag using
+     this approach). There is no equivalent workaround for `onDragEnd`
+     itself — a drag-driven "drop" action can't be verified by a synthetic
+     release in this pane; verify it indirectly instead (e.g. trigger the
+     same underlying helper via a `walkTo`-based path, or trust the
+     onDragEnd wiring by inspection once the shape matches an
+     already-verified version) and note in the write-up that the
+     drop-release path specifically relies on the real Electron window's
+     normal (always-focused, un-throttled) rAF behavior.
+- **Frozen entrance animations also freeze element GEOMETRY**: the radial
+  menu's segments stay at their initial `scale(0)`, so their buttons
+  measure 0×0 — never filter candidate buttons by rect size in this pane
+  (match by textContent instead), and treat `walkTo`-style rAF walks as
+  taking up to their full 6s watchdog before promises resolve.
 
 ### What this technique has already caught (don't re-derive from scratch)
 - The `useConsumables.ts` eager-bailout bug (see pet-game-mechanics skill) —

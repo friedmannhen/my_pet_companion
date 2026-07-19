@@ -4,6 +4,7 @@
 // Segments pop outward from the pet in a staggered spring, matching the
 // QA hub's radial pet panel feel.
 import { motion } from "framer-motion";
+import { Tooltip } from "./Tooltip";
 
 export interface RadialAction {
   key: string;
@@ -96,32 +97,33 @@ export function RadialMenu({
                 />
               </svg>
             )}
-            <button
-              data-interactive
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!action.disabled) action.onClick();
-              }}
-              disabled={action.disabled}
-              title={action.label}
-              style={{
-                width: SEGMENT_SIZE,
-                height: SEGMENT_SIZE,
-                borderRadius: "50%",
-                border: "none",
-                cursor: action.disabled ? "default" : "pointer",
-                opacity: action.disabled ? 0.45 : 1,
-                background: action.highlight ? "rgba(52,211,153,0.92)" : "rgba(28,28,34,0.94)",
-                color: "#fff",
-                fontSize: 18,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                boxShadow: "0 3px 10px rgba(0,0,0,0.45)",
-              }}
-            >
-              {action.icon}
-            </button>
+            <Tooltip label={action.label}>
+              <button
+                data-interactive
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!action.disabled) action.onClick();
+                }}
+                disabled={action.disabled}
+                style={{
+                  width: SEGMENT_SIZE,
+                  height: SEGMENT_SIZE,
+                  borderRadius: "50%",
+                  border: "none",
+                  cursor: action.disabled ? "default" : "pointer",
+                  opacity: action.disabled ? 0.45 : 1,
+                  background: action.highlight ? "rgba(52,211,153,0.92)" : "rgba(28,28,34,0.94)",
+                  color: "#fff",
+                  fontSize: 18,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  boxShadow: "0 3px 10px rgba(0,0,0,0.45)",
+                }}
+              >
+                {action.icon}
+              </button>
+            </Tooltip>
             {hasCooldown && action.disabled && action.cooldownLabel && (
               <div
                 style={{

@@ -194,7 +194,16 @@ that needs "am I the host / is it my turn".
   lowest distance wins a round) → sudden death among tied leaders (capped
   at 3 all-skip passes → co-win). Every event carries a `seq` guard
   (dropped unless it extends the local log exactly).
-- **AFK**: the active player's client self-skips at 15s; if the active
+- **Live aim preview** (`mg {kind:"aim"}`, late Jul 2026): while pulling
+  back, the active thrower broadcasts the pull displacement as viewport
+  fractions (`sendTossAim`, throttled ~90ms like `pos`; `clearTossAim` on
+  release). Receivers hold it in `room.tossAim` — display-only (never in
+  the reducer/event log, no seq guard; last-write-wins is correct for a
+  preview) — and mirror the same `*0.35` displacement on the active
+  player's puck sprite. Cleared on release, on any applied throw/skip for
+  that user, and by a >800ms staleness sweep in housekeeping.
+- **AFK**: the active player's client self-skips at 30s
+  (`TOSS_TURN_TIMEOUT_MS`, raised from 15s); if the active
   player LEFT the room (gone from presence), the first still-present
   participant in turn order is the skip authority (not the host — a
   departed host can't stall the game). Known low-probability race: a throw
@@ -271,6 +280,78 @@ that needs "am I the host / is it my turn".
   and radial-menu click — belt-and-suspenders on top of the overlay's
   z-index already blocking those clicks structurally.
 
+## Forfeit ("Give up", Jul 2026 plan Phase 1)
+
+Always decisive: the quitter takes the loss, the opponent gets the win — a
+silent app-close never resolves anything.
+- **RPS**: `room.forfeitMinigame()` broadcasts `minigame {kind:"forfeit"}`;
+  BOTH clients set `outcome` (+ `forfeitedBy`), so the normal
+  onMinigameResolved path records both results. `forfeitedBy` skips the
+  reveal drumroll in the modal.
+- **Target Toss**: `room.forfeitTossGame()` broadcasts `mg
+  {kind:"forfeit"}` and closes the quitter's board; GameView's `onForfeit`
+  prop records the quitter's own loss first (game-over effect can't — the
+  game is null by then). Remaining clients add the quitter to
+  `TargetTossState.forfeited`: their turns fast-skip (TOSS_DEPARTED_SKIP_MS
+  only, and the skip authority must itself be non-forfeited), and when only
+  ONE active participant remains, every remaining client derives
+  `winners=[them]` locally (decisive win, NOT the "not enough players"
+  cancel — that cancel path now explicitly skips forfeit-driven dwindling).
+- Battle deliberately has no forfeit (resolves instantly anyway).
+
+## Chess (Jul 2026 plan Phase 3) — persistent 1:1, DB + broadcast hybrid
+
+Unlike every other minigame, chess games PERSIST (untimed — see the
+pet-game-backend skill for the chess_games table/RPCs). Architecture: the
+DB row is the resume-of-record; the `chess` broadcast event only keeps LIVE
+clients in sync. All handlers live in join()'s buildAndSubscribe (topic
+dedupe rule). Flow:
+- Challenge: `chessChallenge(target)` (♟️ button on a remote pet's
+  mini-menu) → targeted `invite`; acceptor sends `accept`; the CHALLENGER
+  (white/player_a) inserts the chess_games row, then broadcasts `start
+  {gameId}` — everyone fetches that row (spectators too), players auto-open
+  the board. 23505 on insert = one-active-game-per-pair → friendly
+  chessNotice.
+- Moves: chess.js validates locally in `minigames/Chess.tsx`
+  (auto-queen promotion); `sendChessMove` applies optimistically, updates
+  the row (RLS allows: mover == current_turn), and broadcasts `move` with
+  `ply` = history length after the move (applied only if it extends
+  exactly; gaps self-heal on next DB load). Checkmate/draw ride the same
+  update (`end` fields inline). **Move-history shape (late Jul 2026)**:
+  entries are `{san, at}` objects (`ChessMoveEntry`) in the SAME
+  `move_history` jsonb column — no migration; `chessRowToGame` normalizes
+  old bare-SAN-string rows to `{san, at: null}` on read so the UI never
+  handles a union. The board panel renders a numbered paired move list
+  (auto-scrolled to newest) with compact relative times.
+- Board panel UX: draggable by its header (dragControls handoff) and
+  resizable via a ↘ corner grip driving a whole-panel `scale` (composed
+  into framer's transform — never literal width/height); `{x, y, scale}`
+  persist to localStorage `mpc_chess_panel_prefs` and clamp back on window
+  resize. The Poke button locks for 3s after sending ("✅ Poke sent") so it
+  can't spam the opponent's inbox.
+- Endings: resign → `resign_chess_game` RPC + `end` broadcast; mutual
+  cancel → `cancel-propose`/`cancel-accept` handshake then
+  `cancel_chess_game` RPC (abandoned, NO score impact);
+  `opponent_unreachable` unilateral cancel is UI-gated on opponent absent
+  + no game activity for CHESS_UNREACHABLE_GRACE_MS (48h). Each PLAYER
+  client fires `onChessResolved` exactly once per finished game
+  (chessRecordedRef) → GameView records history + `record_minigame_result
+  ('chess')`. A fully-offline player misses their record (accepted, same
+  as notifications).
+- Visibility: leaving the ROOM never resolves a game (teardown only clears
+  local panel state); minimize collapses to a chip (never forfeits); a
+  picker beside RoomBar lists all active games in the room
+  (resume/spectate); SideDock shows a ♟ tab badge (my active games) and a
+  per-group-card count (`useGroupChessCount`); leaving a GROUP with my
+  active game warns first ("leave anyway" two-click).
+- Poke: `chess_poke` notification kind (whitelisted in useNotifications,
+  payload carries groupId + gameId); tapping the toast deep-links — joins
+  that room if needed and opens that specific board.
+- Kings render as the players' live pet sprites (own save for me, presence
+  data for others — falls back to the classic glyph if the owner isn't in
+  presence); per-viewer orientation is a pure render flip (own side at the
+  bottom, spectators see White below).
+
 ## Personal notifications (`useNotifications.ts`, Jul 2026)
 
 Realtime-only (deliberately NO DB persistence — a notification is missed if
@@ -283,9 +364,21 @@ dedupe footgun). `sendTo` auto-stamps `fromId: userId` onto every payload
 (callers never pass it) — this is what lets a decline round-trip back to
 the exact right person. Kinds: `friend_request`, `friend_accepted` (sent
 from SideDock's Add/Accept buttons), `room_invite` (sent from the 🌐 Invite
-button on a friend row, only visible while in a room), and
+button on a friend row, only visible while in a room),
 `room_invite_declined` — a **control signal**, never shown as a toast/
-inbox entry, exposed instead as `lastDecline: {fromId, groupId, at}`. UI:
+inbox entry, exposed instead as `lastDecline: {fromId, groupId, at}` —
+plus (Jul 2026) `chess_turn` — LOCAL-ONLY like update_ready: GameView
+derives it from already-synced `room.chessGames` when a game's
+`currentTurn` flips opponent→me (per-game last-seen ref so it fires exactly
+once per transition, suppressed while that board is open unminimized) and
+shows it via `notifications.setLocalToast(...)`, which reuses the normal
+toast TTL/dismiss machinery without broadcasting anything — and
+`chess_poke` (targeted, whitelisted inbound, deep-links on
+tap) and `update_ready` — the latter is **local-only**: synthesized in
+GameView from `appUpdate.updateState === "ready"`, never broadcast,
+deliberately NOT in the inbound whitelist, no TTL auto-clear (explicit
+"Later" dismisses; a ⬆ tab badge then persists until installed; "Update
+now" calls installUpdate() right from the toast). UI:
 a clickable "the pet tells you" bubble above the local pet (6s TTL, opens
 the dock at friends/groups), plus a persistent Join/Dismiss banner for room
 invites mounted NEXT TO RoomBar in GameView (RoomBar renders nothing

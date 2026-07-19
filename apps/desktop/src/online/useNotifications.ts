@@ -18,7 +18,21 @@ export type NotificationKind =
   // Control signal only — never shown as a toast/inbox entry. Lets the
   // ORIGINAL inviter clear their "pending" button state the moment the
   // recipient responds, instead of only via the 60s timeout.
-  | "room_invite_declined";
+  | "room_invite_declined"
+  // LOCAL-ONLY: synthesized in GameView from appUpdate.updateState — never
+  // sent via sendTo/broadcast, so it's deliberately NOT in the inbound
+  // kind-whitelist below. Documented here so the kind namespace stays in
+  // one place.
+  | "update_ready"
+  // Targeted "it's your move" nudge from a chess opponent. Carries
+  // groupId + gameId so tapping the toast can deep-link into that room and
+  // restore the minimized board.
+  | "chess_poke"
+  // LOCAL-ONLY (like update_ready): synthesized in GameView from the
+  // already-synced chessGames state when a game's currentTurn flips to me —
+  // never broadcast, deliberately NOT in the inbound whitelist. Delivered
+  // through setLocalToast so it reuses the normal toast TTL/dismiss logic.
+  | "chess_turn";
 
 export interface AppNotification {
   id: string;
@@ -28,10 +42,12 @@ export interface AppNotification {
    *  original inviter) match this notification back to a specific person. */
   fromId: string;
   at: number;
-  /** room_invite / room_invite_declined */
+  /** room_invite / room_invite_declined / chess_poke */
   groupId?: string;
   groupName?: string;
   inviteCode?: string;
+  /** chess_poke: the chess game to restore on tap (deep-link). */
+  gameId?: string;
 }
 
 const TOAST_TTL_MS = 6_000;
@@ -52,6 +68,10 @@ export interface UseNotifications {
    *  pending state early instead of waiting out its own 60s timer. */
   lastDecline: { fromId: string; groupId?: string; at: number } | null;
   sendTo: (targetUserId: string, payload: Omit<AppNotification, "id" | "at" | "fromId">) => void;
+  /** Show a LOCAL-ONLY toast (update_ready/chess_turn class) through the
+   *  exact same toast/TTL/dismiss machinery as realtime kinds — nothing is
+   *  ever broadcast. */
+  setLocalToast: (payload: Omit<AppNotification, "id" | "at">) => void;
   dismissToast: () => void;
   /** Dismiss the current room invite AND tell the inviter (so their pending
    *  "Invited…" button clears immediately instead of waiting 60s). */
@@ -136,7 +156,13 @@ export function useNotifications(userId: string | null, displayName: string): Us
         setLastDecline({ fromId, groupId: p.groupId, at: Date.now() });
         return;
       }
-      if (p.kind !== "friend_request" && p.kind !== "friend_accepted" && p.kind !== "room_invite") return;
+      if (
+        p.kind !== "friend_request" &&
+        p.kind !== "friend_accepted" &&
+        p.kind !== "room_invite" &&
+        p.kind !== "chess_poke"
+      )
+        return;
       const note: AppNotification = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         kind: p.kind,
@@ -146,6 +172,7 @@ export function useNotifications(userId: string | null, displayName: string): Us
         groupId: typeof p.groupId === "string" ? p.groupId : undefined,
         groupName: typeof p.groupName === "string" ? p.groupName : undefined,
         inviteCode: typeof p.inviteCode === "string" ? p.inviteCode : undefined,
+        gameId: typeof p.gameId === "string" ? p.gameId : undefined,
       };
       setToast(note);
       setInbox((prev) => [note, ...prev].slice(0, INBOX_MAX));
@@ -182,6 +209,16 @@ export function useNotifications(userId: string | null, displayName: string): Us
     return () => clearInterval(id);
   }, [roomInvite, declineInvite]);
 
+  const setLocalToast = useCallback((payload: Omit<AppNotification, "id" | "at">) => {
+    const note: AppNotification = {
+      ...payload,
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      at: Date.now(),
+    };
+    setToast(note);
+    setInbox((prev) => [note, ...prev].slice(0, INBOX_MAX));
+  }, []);
+
   const dismissToast = useCallback(() => setToast(null), []);
   const dismissRoomInvite = useCallback(() => {
     setRoomInvite((inv) => {
@@ -190,5 +227,5 @@ export function useNotifications(userId: string | null, displayName: string): Us
     });
   }, [declineInvite]);
 
-  return { toast, inbox, roomInvite, lastDecline, sendTo, dismissToast, dismissRoomInvite };
+  return { toast, inbox, roomInvite, lastDecline, sendTo, setLocalToast, dismissToast, dismissRoomInvite };
 }

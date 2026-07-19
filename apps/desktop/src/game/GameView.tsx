@@ -18,9 +18,11 @@ import {
   motion,
   useDragControls,
   useMotionValue,
+  useMotionValueEvent,
   useSpring,
   useTransform,
 } from "framer-motion";
+import { POOP_RULES, shouldSpawnPoop } from "@pet/core";
 import type { AuthState } from "../supabase/useAuth";
 import { supabase } from "../supabase/client";
 import { usePetGame } from "./usePetGame";
@@ -30,6 +32,7 @@ import { usePetMovement } from "./usePetMovement";
 import { PetEffects, type PetFxTrigger } from "./PetEffects";
 import { AdminPanel } from "./AdminPanel";
 import { RadialMenu, type RadialAction } from "./RadialMenu";
+import { Tooltip } from "./Tooltip";
 import { throwArc } from "./throwPhysics";
 import { SideDock } from "./SideDock";
 import { useRibbonPrefs } from "./useRibbonPrefs";
@@ -43,6 +46,8 @@ import { RemotePets } from "../online/RemotePets";
 import { RoomBar } from "../online/RoomBar";
 import { TargetToss } from "./minigames/TargetToss";
 import { RockPaperScissors } from "./minigames/RockPaperScissors";
+import { ChessPanel } from "./minigames/Chess";
+import type { ChessGame } from "../online/useRoom";
 import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
@@ -147,6 +152,13 @@ const bannerStyle: React.CSSProperties = {
 
 const THROW_EASE: [number, number, number, number] = [0.3, 0, 1, 1];
 const PET_COOLDOWN_MS = 5 * 60 * 1000;
+// The pet's own container can render as high as 25200 (menu open, Part G) —
+// the scrub sponge/bubbles and the warm-lamp cursor must stay comfortably
+// above that so they never disappear behind the pet's body while in use.
+const ABOVE_PET_Z = 25300;
+/** Drop-on-nest radius (px, center-to-center) for dragging the pet/egg
+ *  straight onto the [data-homeslot] element to send it home. */
+const NEST_DROP_RADIUS = 90;
 
 // throwArc lives in throwPhysics.ts now (shared with the Target Toss
 // minigame) — same math, pure extraction.
@@ -174,6 +186,15 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   const ribbon = useRibbonPrefs();
   const appUpdate = useAppUpdate();
+  // update_ready notice (Phase 0.5): a persistent, directly-actionable toast
+  // the moment an update finishes downloading — local-only (synthesized from
+  // appUpdate state, never broadcast), no TTL auto-clear (only an explicit
+  // "Later"/install dismisses it). After dismissal a tab badge persists.
+  const [updateToastDismissed, setUpdateToastDismissed] = useState(false);
+  useEffect(() => {
+    if (appUpdate.updateState !== "ready") setUpdateToastDismissed(false);
+  }, [appUpdate.updateState]);
+  const showUpdateToast = appUpdate.updateState === "ready" && !updateToastDismissed;
   const consumables = useConsumables();
   const prefs = useGamePrefs();
   const soundRef = useRef(prefs.soundEnabled);
@@ -266,6 +287,27 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // "Follow Me" — chases the cursor; overrides Stay/Free-Roam while active
   // and is force-cancelled below whenever the pet becomes non-interactive.
   const [isFollowing, setIsFollowing] = useState(false);
+  // "Send Home" (Part F): the pet was walked to the dock's nest slot and
+  // parks there. Cleared by dragging the pet away or picking Free Roam /
+  // Follow Me again — never times out on its own.
+  const [sentHome, setSentHome] = useState(false);
+  const sentHomeRef = useRef(false);
+  sentHomeRef.current = sentHome;
+  // Once the walk arrives, the pet "enters" the nest: the roaming sprite
+  // fades/scales away and stays HIDDEN (even with the menus closed — this
+  // is the quiet-time feature); the Home panel's nest slot shows the idle
+  // asset instead, and clicking the slot is what releases the pet again.
+  const [petNested, setPetNested] = useState(false);
+  const petNestedRef = useRef(false);
+  petNestedRef.current = petNested;
+  // Transient "coming out of the nest" pulse: scale grows back from 0 (the
+  // framer spring on the display-scale wrapper already animates this once
+  // petNested flips false) with an extra wiggle layered on top for flair.
+  const [petExitingNest, setPetExitingNest] = useState(false);
+  // wakeFromNest is declared after grabFood/grabBall (which need to call it
+  // when the pet is grabbed for a care action while nested) — forward
+  // reference via a ref, same pattern as throwFoodRef/runBallFetchRef.
+  const wakeFromNestRef = useRef<() => void>(() => {});
 
   // True while the pet is mid-action in a way that needs it to stand still
   // and not be interrupted: no wander, no drag, no menu-open tap. Any
@@ -299,6 +341,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const lagY = useSpring(movement.y, { stiffness: 300, damping: 42 });
   const leanX = useTransform(() => lagX.get() - movement.x.get());
   const leanY = useTransform(() => lagY.get() - movement.y.get());
+
+  // Idle-liveliness motion values (framer-driven breathing squash + gesture
+  // tilt) — driven/reset by the idleBreathing effect further down; they get
+  // their own dedicated wrapper node so they can't clobber anything else.
+  const breatheScaleX = useMotionValue(1);
+  const breatheScaleY = useMotionValue(1);
+  const gestureRotate = useMotionValue(0);
 
   // Blink loop — 3–7s randomized, occasional double-blink.
   useEffect(() => {
@@ -534,6 +583,81 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     setTimeout(() => setFxTrigger((t) => (t === "happy" ? null : t)), 900);
   }, []);
 
+  // ── Poop cleanup mechanic ────────────────────────────────────────────────
+  // Post-hatch only (an egg never poops — shouldSpawnPoop gates on isEgg).
+  // After a feed lands, a poop may spawn: the pet does a quick wiggle first
+  // (same transient-class pattern as petSeatedWiggling), then the poop
+  // slides/fades in just below the pet. It's dragged onto the trash can in
+  // the Kitchen drawer (the [data-trashcan] element) for a small
+  // happiness/care-point bump. Uncleaned poops are session-only state.
+  const [poops, setPoops] = useState<{ id: number; x: number; y: number }[]>([]);
+  const [petPoopWiggling, setPetPoopWiggling] = useState(false);
+  // True while a poop is being dragged directly over the Kitchen's trash
+  // can — lets SideDock enlarge/highlight the can so the drop target is
+  // obvious before the player releases (same hit-test rect as dropPoop).
+  const [poopOverTrash, setPoopOverTrash] = useState(false);
+  const poopIdRef = useRef(0);
+  const poopsRef = useRef(poops);
+  poopsRef.current = poops;
+  const poopTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  useEffect(
+    () => () => {
+      poopTimersRef.current.forEach(clearTimeout);
+    },
+    [],
+  );
+
+  const schedulePoopSpawn = useCallback(() => {
+    if (!shouldSpawnPoop(gameRef.current.isEgg, poopsRef.current.length)) return;
+    const delay = POOP_RULES.minDelayMs + Math.random() * (POOP_RULES.maxDelayMs - POOP_RULES.minDelayMs);
+    const t1 = setTimeout(() => {
+      if (gameRef.current.isEgg || !gameRef.current.save.isAlive) return;
+      // Wiggle first ("something's coming"), then the poop slides in below.
+      setPetPoopWiggling(true);
+      const t2 = setTimeout(() => setPetPoopWiggling(false), 700);
+      const t3 = setTimeout(() => {
+        const px = movement.x.get() + PET_SIZE / 2 - 14 + (Math.random() * 36 - 18);
+        const py = movement.y.get() + PET_SIZE - 26;
+        setPoops((prev) => [...prev, { id: ++poopIdRef.current, x: px, y: py }]);
+        dbg("poop spawned 💩");
+      }, 550);
+      poopTimersRef.current.push(t2, t3);
+    }, delay);
+    poopTimersRef.current.push(t1);
+  }, [movement, dbg]);
+
+  // Restart/regression to egg clears any uncleaned poop (an egg can't have
+  // pooped, and the trash can is hidden during the egg phase anyway).
+  useEffect(() => {
+    if (game.isEgg) setPoops([]);
+  }, [game.isEgg]);
+
+  /** Release handler for a dragged poop: over the Kitchen's trash can →
+   *  cleaned (small reward), anywhere else → it just stays put. Guarded by
+   *  id so the native-pointerup trigger and any late framer onDragEnd can't
+   *  double-clean the same poop. */
+  const isOverTrash = useCallback((pointX: number, pointY: number) => {
+    const can = document.querySelector("[data-trashcan]")?.getBoundingClientRect();
+    return !!can && pointX >= can.left - 8 && pointX <= can.right + 8 && pointY >= can.top - 8 && pointY <= can.bottom + 8;
+  }, []);
+
+  const dropPoop = useCallback(
+    (id: number, pointX: number, pointY: number) => {
+      if (!poopsRef.current.some((p) => p.id === id)) return; // already handled
+      const hit = isOverTrash(pointX, pointY);
+      setPoopOverTrash(false);
+      if (!hit) return;
+      setPoops((prev) => prev.filter((p) => p.id !== id));
+      poopsRef.current = poopsRef.current.filter((p) => p.id !== id);
+      expectDeltaRef.current = true;
+      gameRef.current.cleanPoop();
+      pulseHappy();
+      sfx(Sounds.playSplash);
+      dbg("poop cleaned 🗑️");
+    },
+    [isOverTrash, pulseHappy, sfx, dbg],
+  );
+
   // ── Online: groups + realtime room ──────────────────────────────────────
   const groupsApi = useGroups(auth.userId);
   const myName = auth.displayName || auth.email?.split("@")[0] || "Player";
@@ -594,6 +718,28 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     },
     [game, pulseHappy, sfx, dbg],
   );
+  // Chess resolution: fires once per DECISIVE ending (checkmate/resignation)
+  // or draw, on each player's own client. Abandoned (cancelled) games never
+  // reach here — no score impact by design.
+  const onChessResolved = useCallback(
+    (outcome: "win" | "lose" | "tie", opponentName: string) => {
+      game.applyMinigameResult(outcome, "Chess");
+      if (supabase) {
+        void supabase
+          .rpc("record_minigame_result", { p_game_code: "chess", p_distance: null, p_won: outcome === "win" })
+          .then(({ error }) => {
+            if (error) dbg(`chess score save failed: ${error.message}`);
+          });
+      }
+      if (outcome === "win") {
+        pulseHappy();
+        sfx(Sounds.playEvolution);
+      }
+      dbg(`chess vs ${opponentName}: ${outcome}`);
+    },
+    [game, pulseHappy, sfx, dbg],
+  );
+
   const room = useRoom({
     userId: auth.userId,
     displayName: myName,
@@ -602,7 +748,73 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     onSocialPet,
     onBattleResolved,
     onMinigameResolved,
+    onChessResolved,
   });
+
+  // Poke (chess): a targeted "it's your move" nudge through the personal
+  // user-inbox — reaches the opponent even if they minimized the board or
+  // left the room (missed only if their app is fully closed). The payload
+  // carries groupId + gameId so tapping the toast deep-links back here.
+  const pokeChessOpponent = useCallback(
+    (opponentId: string, chessGame: ChessGame) => {
+      if (!room.activeGroup) return;
+      notifications.sendTo(opponentId, {
+        kind: "chess_poke",
+        fromName: myName,
+        groupId: room.activeGroup.id,
+        groupName: room.activeGroup.name,
+        gameId: chessGame.id,
+      });
+      dbg("chess poke sent 👉");
+    },
+    [notifications, myName, room.activeGroup, dbg],
+  );
+
+  // Chess notices auto-clear after a few seconds.
+  useEffect(() => {
+    if (!room.chessNotice) return;
+    const id = setTimeout(room.clearChessNotice, 5000);
+    return () => clearTimeout(id);
+  }, [room.chessNotice, room.clearChessNotice]);
+
+  // "Your turn" local notification (mirrors update_ready's LOCAL-ONLY
+  // pattern): derived purely from the already-synced room.chessGames — no
+  // new broadcast kind. Tracks the last-seen currentTurn per game and fires
+  // exactly on the opponent→me transition (never on load, never re-fires
+  // for an unchanged turn). Suppressed while that game's board is already
+  // open in front of the player — a toast would be pure noise then.
+  const chessTurnSeenRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!auth.userId) return;
+    for (const g of room.chessGames) {
+      const prior = chessTurnSeenRef.current[g.id];
+      chessTurnSeenRef.current[g.id] = g.currentTurn;
+      if (g.status !== "active") continue;
+      if (g.playerAId !== auth.userId && g.playerBId !== auth.userId) continue;
+      if (prior === undefined || prior === g.currentTurn) continue;
+      if (prior === auth.userId || g.currentTurn !== auth.userId) continue;
+      if (room.openChessGameId === g.id && !room.chessMinimized) continue;
+      const opponentId = g.playerAId === auth.userId ? g.playerBId : g.playerAId;
+      const opponentName = room.members.find((m) => m.userId === opponentId)?.name ?? "Your opponent";
+      notifications.setLocalToast({
+        kind: "chess_turn",
+        fromName: opponentName,
+        fromId: opponentId,
+        groupId: room.activeGroup?.id,
+        gameId: g.id,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.chessGames, auth.userId]);
+
+  const myActiveChessGames = auth.userId
+    ? room.chessGames.filter(
+      (g) => g.status === "active" && (g.playerAId === auth.userId || g.playerBId === auth.userId),
+    )
+    : [];
+  const openChessGame = room.openChessGameId
+    ? room.chessGames.find((g) => g.id === room.openChessGameId) ?? null
+    : null;
 
   // Room-invite spam guard: one outstanding invite per friend at a time,
   // cleared when they join, when they explicitly decline (notifications
@@ -695,7 +907,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     const won = g.core.winners.includes(auth.userId);
     const myDistances = g.core.events
       .filter((e) => e.userId === auth.userId && e.distance !== null)
-      .map((e) => e.distance!) ;
+      .map((e) => e.distance!);
     const best = myDistances.length > 0 ? Math.min(...myDistances) : null;
     game.applyMinigameResult(won ? "win" : "lose", "Target Toss");
     if (supabase) {
@@ -710,6 +922,22 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       sfx(Sounds.playEvolution);
     }
   }, [room.tossGame, auth.userId, game, pulseHappy, sfx, dbg]);
+
+  // "Give up" in Target Toss: the quitter records their OWN loss (decisive
+  // — mirrors the game-over recording path), then the room broadcasts the
+  // forfeit so remaining players can fast-skip/resolve.
+  const forfeitToss = useCallback(() => {
+    game.applyMinigameResult("lose", "Target Toss");
+    if (supabase) {
+      void supabase
+        .rpc("record_minigame_result", { p_game_code: "target_toss", p_distance: null, p_won: false })
+        .then(({ error }) => {
+          if (error) dbg(`toss forfeit save failed: ${error.message}`);
+        });
+    }
+    room.forfeitTossGame();
+    dbg("gave up Target Toss 🏳️");
+  }, [game, room, dbg]);
 
   // Publish my pet's position (normalized to screen fraction so every
   // member's monitor maps it proportionally) while in a room.
@@ -766,10 +994,17 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   // (this exact race was a real, previously-fixed bug in an earlier round).
   const foodReleasedRef = useRef(false);
   const foodUpListenerRef = useRef<(() => void) | null>(null);
+  // Which pile slot the currently-held piece came from — cancelFeed needs
+  // this to give it back (consumables.returnFood) if the grab never
+  // actually reaches throwFood.
+  const grabbedFoodSlotRef = useRef(0);
 
+  // Feed/ball stay available while nested — grabbing either wakes the pet
+  // automatically (see grabFood/grabBall) so the action just starts.
+  // Cleaning doesn't make sense on a hidden/nested pet, so it's blocked.
   const canFeed = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
   const canPlayBall = save.isAlive && !save.isSleeping && !game.isEgg && !petBusy;
-  const canClean = save.isAlive && !save.isSleeping && save.cleanliness < 100 && !petBusy;
+  const canClean = save.isAlive && !save.isSleeping && save.cleanliness < 100 && !petBusy && !petNested;
 
   const throwFoodRef = useRef<(vx: number, vy: number) => void>(() => { });
 
@@ -784,7 +1019,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         return;
       }
       dbg(`feed: took slot ${slot}`);
-      setStatsOpen(false);
+      grabbedFoodSlotRef.current = slot;
+      // Grabbing food while the pet is nested wakes it automatically — the
+      // exit (scale-up + wiggle) plays concurrently with the throw, and the
+      // pet's own walkTo-to-eat at the end carries it clear of the nest.
+      wakeFromNestRef.current();
+      // The dock/kitchen deliberately STAY open during the drag-throw (the
+      // kitchen is its own drawer now) — only the radial menu closes.
       setMenuOpen(false);
       foodCanceledRef.current = false;
       foodReleasedRef.current = false;
@@ -912,6 +1153,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         expectDeltaRef.current = true;
         game.feed();
         dbg("feed eaten");
+        // A fed pet may need to poop a little while later (post-hatch only).
+        schedulePoopSpawn();
         await new Promise((r) => setTimeout(r, 450));
         await Promise.all([
           animate(foodScaleX, 0, { duration: 0.3, ease: "easeIn" }),
@@ -930,7 +1173,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         window.overlay.setClickable(false);
       }
     },
-    [foodX, foodY, foodScaleX, foodScaleY, foodRotate, foodOpacity, movement, game, sfx, dbg],
+    [foodX, foodY, foodScaleX, foodScaleY, foodRotate, foodOpacity, movement, game, sfx, dbg, schedulePoopSpawn],
   );
   throwFoodRef.current = (vx, vy) => void throwFood(vx, vy);
 
@@ -950,9 +1193,12 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       setFeedPhase("idle");
       setClickableOverride(false);
       window.overlay.setClickable(false);
+      // Give the piece back — it was never actually thrown/eaten (mirrors
+      // cancelBall's consumables.returnBall() below).
+      consumables.returnFood(grabbedFoodSlotRef.current);
     }
     dbg("feed canceled");
-  }, [feedPhase, foodOpacity, dbg]);
+  }, [feedPhase, foodOpacity, dbg, consumables]);
 
   useEffect(() => {
     if (feedPhase === "idle") return;
@@ -996,7 +1242,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         return;
       }
       dbg("ball: taken");
-      setStatsOpen(false);
+      // Grabbing the ball while nested wakes the pet automatically (see
+      // grabFood's matching comment).
+      wakeFromNestRef.current();
+      // Kitchen stays open during the drag-throw (see grabFood's comment).
       setMenuOpen(false);
       ballCanceledRef.current = false;
       ballReleasedRef.current = false;
@@ -1599,6 +1848,71 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     }, 10000);
   }, [game, petBusy, sfx]);
 
+  // "Send Home" (Part F, extended): walks the pet onto the dock's nest slot
+  // (the [data-homeslot] element in the Home panel header — attribute-based
+  // rect lookup like the trash can) and parks it there in static mode.
+  // Shared by two entry points: the radial 🏠 action (which opens the dock
+  // first, hence the delayed call below) and dragging the pet/egg directly
+  // onto the visible slot (petDragHandlers.onDragEnd) — the drop path calls
+  // this immediately since the dock/slot must already be on-screen for the
+  // drop to have hit-tested positive in the first place. `speedPxPerFrame`
+  // lets the drop path use a quick snap (the pet is already right next to
+  // the slot) instead of the radial path's normal walking speed.
+  const enterNest = useCallback(
+    (speedPxPerFrame?: number) => {
+      const slot = document.querySelector("[data-homeslot]")?.getBoundingClientRect();
+      if (!slot) {
+        dbg("send home: no slot (dock closed?)");
+        return;
+      }
+      setIsFollowing(false);
+      prefs.setMovementMode("static");
+      setSentHome(true);
+      // walkTo has its own 6s watchdog — no petBusy-style lockup risk.
+      // On arrival the pet tucks itself into the nest (fade+shrink, then
+      // the roaming sprite stays hidden) — unless something cancelled
+      // Send Home while it was still walking.
+      void movement
+        .walkTo(slot.left + slot.width / 2 - PET_SIZE / 2, slot.top + slot.height / 2 - PET_SIZE / 2, speedPxPerFrame)
+        .then(() => {
+          if (sentHomeRef.current) setPetNested(true);
+        });
+      dbg("sent home 🪺");
+    },
+    // movement.walkTo (not the whole `movement` object, which is a fresh
+    // object literal every render) — see petDragOnDrag's comment below for
+    // why depending on the unstable wrapper object breaks a live drag.
+    [movement.walkTo, prefs.setMovementMode, dbg],
+  );
+
+  const sendHome = useCallback(() => {
+    setMenuOpen(false);
+    setStatsOpen(true);
+    // Force the dock onto the Home tab regardless of which panel the
+    // player was viewing — the nest slot only renders inside Home content,
+    // and "force-focus the main tab" is the whole point of Send Home.
+    ribbon.setActivePanel(null);
+    // The short delay lets the Home panel's slide-in settle before its
+    // rect is read.
+    setTimeout(() => enterNest(), 500);
+  }, [ribbon.setActivePanel, enterNest]);
+
+  /** Release the pet from the nest — either the slot's own click, or
+   *  automatically when a care action (feed/ball) grabs the pet while it's
+   *  nested. No-ops if the pet isn't actually nested (safe to call from
+   *  grabFood/grabBall unconditionally). Clears petNested immediately (the
+   *  display-scale spring animates 0→normal on its own) and layers a short
+   *  wiggle on top so it visibly "comes out" rather than just popping back. */
+  const wakeFromNest = useCallback(() => {
+    if (!petNestedRef.current) return;
+    setPetNested(false);
+    setSentHome(false);
+    setPetExitingNest(true);
+    setTimeout(() => setPetExitingNest(false), 650);
+    dbg("pet left the nest");
+  }, [dbg]);
+  wakeFromNestRef.current = wakeFromNest;
+
   // Feed/Wash/Ball all live in the SideDock now — the radial menu only
   // handles instant-click care actions. A ready-to-hatch egg gets its own
   // minimal menu (just "Evolve!", which kicks off advanceHatch) instead of
@@ -1628,17 +1942,39 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           key: "movementMode",
           icon: prefs.movementMode === "free" ? "📌" : "🐾",
           label: prefs.movementMode === "free" ? "Stay" : "Free Roam",
-          onClick: prefs.toggleMovementMode,
+          onClick: () => {
+            // Choosing a movement mode is an explicit "come out" signal —
+            // one of Send Home's two documented cancel conditions.
+            setSentHome(false);
+            setPetNested(false);
+            prefs.toggleMovementMode();
+          },
         },
         {
           key: "follow",
           icon: isFollowing ? "🛑" : "🧲",
           label: isFollowing ? "Stop Follow" : "Follow Me",
           onClick: () => {
+            setSentHome(false);
+            setPetNested(false);
             setIsFollowing((f) => !f);
             // Close the menu so the chase starts immediately — an open menu
             // pauses following (followingActive gates on !menuOpen).
             setMenuOpen(false);
+          },
+        },
+        {
+          key: "sendHome",
+          icon: "🏠",
+          label: sentHome ? "Come out" : "Send Home",
+          onClick: () => {
+            if (sentHome) {
+              setSentHome(false);
+              setPetNested(false);
+              setMenuOpen(false);
+              return;
+            }
+            sendHome();
           },
         },
         { key: "sleep", icon: "🌙", label: "Tuck in", onClick: game.toggleSleep },
@@ -1647,7 +1983,32 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     radialActions.push({ key: "evolve", icon: "✨", label: "Evolve!", onClick: handleEvolve, highlight: true });
   }
 
-  const showRadial = save.isAlive && menuOpen && !petBusy && (!game.isEgg || game.canHatch);
+  const showRadial = save.isAlive && menuOpen && !petBusy && !petNested && (!game.isEgg || game.canHatch);
+
+  // ── Radial menu: outside-click collapse (Phase 0.5) ──────────────────────
+  // Outside the pet's hitbox the overlay window is OS-level click-through, so
+  // a click "anywhere else" never even reaches the renderer. While the menu
+  // is open, reuse the same capture-mode escape hatch feed-throw/scrub use
+  // (clickableOverride + whole-window clickable) and render a full-window
+  // transparent backdrop below the pet whose click closes the menu.
+  const captureBusyRef = useRef(false);
+  captureBusyRef.current = feedPhase !== "idle" || ballPhase !== "idle" || cleaningMode || warmingMode;
+  useEffect(() => {
+    if (!menuOpen) return;
+    setClickableOverride(true);
+    window.overlay.setClickable(true);
+    return () => {
+      // Another capture-mode gesture (feed/ball/scrub/warm) may have taken
+      // ownership of the override synchronously before this cleanup runs —
+      // grabbing food closes the menu as part of starting its own override —
+      // and releasing here would kill THAT drag mid-gesture. Only release
+      // when nothing else owns it; useHitTest's post-override resync then
+      // restores normal cursor-driven click-through on the next tick.
+      if (captureBusyRef.current) return;
+      setClickableOverride(false);
+      window.overlay.setClickable(false);
+    };
+  }, [menuOpen]);
 
   const idleBreathing =
     save.isAlive && !game.isEgg && !save.isSleeping && !movement.isMoving && !petBusy && !happyPulse && !evolvePulse;
@@ -1662,23 +2023,168 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     // frames, so it's excluded here (eggPhase leaves "idle" for the whole
     // hatch sequence, including its post-burst settle/wander/fade tail).
     isEvolving && eggPhase === "idle" ? "pet-anim-charging" : "",
-    petSeatedWiggling ? "egg-anim-wiggle" : "",
-    idleBreathing ? "pet-anim-idle-breathe" : "",
+    // petPoopWiggling: the quick "something's coming" wiggle right before a
+    // poop item slides in (reuses the same transient-class pattern).
+    // petExitingNest: the brief "coming out of the nest" wiggle, layered on
+    // top of the scale-up spring that already plays when petNested clears.
+    petSeatedWiggling || petPoopWiggling || petExitingNest ? "egg-anim-wiggle" : "",
+    // Idle breathing is framer-motion-driven now (see the breathe effect
+    // below) — NOT a CSS class here, so it can never fight bodyClass.
     game.isEgg && game.isEggOverheating ? "pet-anim-overheat" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
+  // ── Idle liveliness: framer-motion breathing + random gestures ──────────
+  // Moved from the pet-anim-idle-breathe CSS keyframe to framer-motion as
+  // the single animation authority for idle motion (scales better as
+  // gestures get richer). These motion values live on their OWN dedicated
+  // wrapper node (inside the display-scale wrapper) so they never fight the
+  // CSS keyframe classes on bodyClass's node or the scale spring.
+  // GUARD RAIL: the instant `idleBreathing` flips off, the cleanup stops
+  // every animation AND resets the motion values to rest — a lingering
+  // inline transform would silently override the walk/eat/happy CSS states.
+  useEffect(() => {
+    if (!idleBreathing) return;
+    const cy = animate(breatheScaleY, [1, 0.985, 1], { duration: 2.6, repeat: Infinity, ease: "easeInOut" });
+    const cx = animate(breatheScaleX, [1, 1.015, 1], { duration: 2.6, repeat: Infinity, ease: "easeInOut" });
+    // Random one-off gestures every ~6–20s: a blink (existing wink asset
+    // swap), a quick head-shake twitch, or a slow look-around tilt. Each
+    // resets its own motion value on completion.
+    let alive = true;
+    let gestureTimer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      gestureTimer = setTimeout(() => {
+        if (!alive) return;
+        const pick = Math.random();
+        if (pick < 0.4) {
+          setBlinking(true);
+          setTimeout(() => alive && setBlinking(false), 160);
+        } else if (pick < 0.75) {
+          void animate(gestureRotate, [0, -4, 4, -2, 0], { duration: 0.7, ease: "easeInOut" }).then(() => {
+            if (alive) gestureRotate.set(0);
+          });
+        } else {
+          void animate(gestureRotate, [0, 6, 6, 0], { duration: 1.6, ease: "easeInOut", times: [0, 0.2, 0.8, 1] }).then(
+            () => {
+              if (alive) gestureRotate.set(0);
+            },
+          );
+        }
+        schedule();
+      }, 6_000 + Math.random() * 14_000);
+    };
+    schedule();
+    return () => {
+      alive = false;
+      clearTimeout(gestureTimer);
+      cy.stop();
+      cx.stop();
+      breatheScaleX.set(1);
+      breatheScaleY.set(1);
+      gestureRotate.set(0);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idleBreathing]);
+
+  // True while the pet/egg is being dragged directly over the nest slot —
+  // lets SideDock enlarge/highlight it so the drop target is obvious
+  // before release (same hover-highlight pattern as the trash can's
+  // poopOverTrash, mirrored for consistency).
+  const [petOverNest, setPetOverNest] = useState(false);
+  // True between onDragStart and onDragEnd — gates the position-change
+  // watcher below so a pet just WANDERING near the slot never flashes the
+  // hover highlight; only an active drag should.
+  const isDraggingRef = useRef(false);
+
+  /** Is the pet's CURRENT position (movement.x/y — already updated by
+   *  framer by the time this is called mid-drag or at release) within
+   *  NEST_DROP_RADIUS of the [data-homeslot] center? Shared by the hover
+   *  watcher and the actual drop decision (onDragEnd). */
+  const isOverNest = useCallback(() => {
+    const slot = document.querySelector("[data-homeslot]")?.getBoundingClientRect();
+    if (!slot) return false;
+    const petCenterX = movement.x.get() + PET_SIZE / 2;
+    const petCenterY = movement.y.get() + PET_SIZE / 2;
+    const dist = Math.hypot(petCenterX - (slot.left + slot.width / 2), petCenterY - (slot.top + slot.height / 2));
+    return dist < NEST_DROP_RADIUS;
+  }, [movement.x, movement.y]);
+
+  // Hover highlight while dragging: MotionValue.set() notifies "change"
+  // subscribers SYNCHRONOUSLY (not rAF-gated), so this tracks position
+  // during a drag without depending on framer's own frame-scheduled drag
+  // internals at all — confirmed via the browser-preview-mock harness that
+  // an rAF-based poll never ticks there (the pane keeps its tab
+  // `document.hidden`/unfocused, which freezes all requestAnimationFrame
+  // callbacks — a pane limitation, not an app bug; see the quests-testing
+  // skill), while this subscription-based approach fires correctly even
+  // there. `isDraggingRef` scopes it to an active drag only (wander/
+  // walkTo/Follow Me also move x/y and shouldn't flash the highlight).
+  useMotionValueEvent(movement.x, "change", () => {
+    if (isDraggingRef.current) setPetOverNest(isOverNest());
+  });
+  useMotionValueEvent(movement.y, "change", () => {
+    if (isDraggingRef.current) setPetOverNest(isOverNest());
+  });
+
   // A hold-to-warm gesture that turns into an actual drag hands off to
   // usePetMovement's own drag handlers — cancel the warm interval so a
   // dragged egg doesn't also rack up warmth.
+  const petDragOnStart = useCallback(() => {
+    isDraggingRef.current = true;
+    if (game.isEgg) stopWarmHold();
+    // Dragging the pet away is Send Home's other cancel condition.
+    setSentHome(false);
+    setPetNested(false);
+    setPetOverNest(false);
+    movement.dragHandlers.onDragStart();
+  }, [game.isEgg, stopWarmHold, movement.dragHandlers.onDragStart]);
+
+  // Drag-and-drop onto the nest: released within NEST_DROP_RADIUS of the
+  // [data-homeslot] center → go home instead of the normal glide-settle.
+  // This is the ONLY way an egg can be sent home (it has no radial action
+  // — canHatch/isEgg gates that menu to just "Evolve!"); for a hatched pet
+  // it's a second entry point alongside the radial's "Send Home". Requires
+  // the Home panel to already be open/visible (same as the trash-can
+  // poop-drop hit-test) — dragging toward a closed/hidden dock just falls
+  // through to the ordinary glide.
+  const petDragOnEnd = useCallback(() => {
+    isDraggingRef.current = false;
+    const hit = isOverNest();
+    setPetOverNest(false);
+    if (hit) {
+      enterNest(18); // a quick snap — the pet is already right there
+      return;
+    }
+    movement.dragHandlers.onDragEnd();
+  }, [isOverNest, enterNest, movement.dragHandlers.onDragEnd]);
+
   const petDragHandlers = {
     ...movement.dragHandlers,
-    onDragStart: () => {
-      if (game.isEgg) stopWarmHold();
-      movement.dragHandlers.onDragStart();
-    },
+    onDragStart: petDragOnStart,
+    onDragEnd: petDragOnEnd,
   };
+
+  // DEV-only automation hooks for the browser-preview-mock technique —
+  // framer-motion's onTap doesn't fire for the synthetic/untrusted clicks
+  // the preview tools dispatch (verified against the unmodified baseline),
+  // so empirically testing dock/menu flows needs a state-level door. Never
+  // present in production builds.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as Record<string, unknown>).__mpc = {
+      toggleDock: () => setStatsOpen((o) => !o),
+      toggleMenu: () => setMenuOpen((o) => !o),
+      spawnPoop: (x?: number, y?: number) =>
+        setPoops((prev) => [
+          ...prev,
+          { id: ++poopIdRef.current, x: x ?? movement.x.get() + PET_SIZE / 2, y: y ?? movement.y.get() + PET_SIZE - 26 },
+        ]),
+    };
+    return () => {
+      delete (window as unknown as Record<string, unknown>).__mpc;
+    };
+  }, [movement]);
 
   // Don't flash the picker while the cloud save is still loading — an
   // existing player signing in on a new device starts from a fresh local
@@ -1737,6 +2243,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onSideChange={ribbon.setSide}
         open={statsOpen}
         onToggle={() => setStatsOpen((o) => !o)}
+        activePanel={ribbon.activePanel}
+        onSetActivePanel={ribbon.setActivePanel}
+        updateBadge={appUpdate.updateState === "ready" && updateToastDismissed}
+        chessBadgeCount={myActiveChessGames.length}
         game={game}
         auth={auth}
         lease={lease}
@@ -1749,12 +2259,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         onGrabBall={grabBall}
         canClean={canClean}
         onStartClean={startCleaning}
-        canWarm={game.isEgg && save.isAlive && !petBusy}
+        poopHoverTrash={poopOverTrash}
+        canWarm={game.isEgg && save.isAlive && !petBusy && !petNested}
         onStartWarm={startWarming}
         soundEnabled={prefs.soundEnabled}
         onToggleSound={prefs.toggleSound}
         followSpeed={prefs.followSpeed}
         onSetFollowSpeed={prefs.setFollowSpeed}
+        hudScale={prefs.hudScale}
+        onSetHudScale={prefs.setHudScale}
+        petScale={prefs.petScale}
+        onSetPetScale={prefs.setPetScale}
+        sentHome={sentHome}
+        petNested={petNested}
+        petHoverNest={petOverNest}
+        onWakeFromNest={wakeFromNest}
         onRename={game.rename}
         onSignOut={auth.signOut}
         onQuit={() => window.overlay.quit()}
@@ -1855,8 +2374,157 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           </button>
         </div>
       )}
-      {room.tossGame && auth.userId && <TargetToss room={room} userId={auth.userId} mySave={save} />}
+      {room.tossGame && auth.userId && (
+        <TargetToss room={room} userId={auth.userId} mySave={save} onForfeit={forfeitToss} />
+      )}
       {room.minigame && auth.userId && <RockPaperScissors room={room} userId={auth.userId} mySave={save} />}
+
+      {/* ── Chess ─────────────────────────────────────────────────────────── */}
+      {/* The open board (players or spectators). */}
+      {openChessGame && !room.chessMinimized && auth.userId && (
+        <ChessPanel room={room} userId={auth.userId} mySave={save} game={openChessGame} onPoke={pokeChessOpponent} />
+      )}
+      {/* Minimized chip — game keeps running behind it; never forfeits. */}
+      {openChessGame && room.chessMinimized && (
+        <Tooltip label="Restore the chess board">
+          <button
+            data-interactive
+            onClick={room.restoreChessPanel}
+            style={{
+              position: "fixed",
+              left: 16,
+              bottom: 110,
+              zIndex: 21500,
+              cursor: "pointer",
+              border: "none",
+              borderRadius: 999,
+              padding: "8px 14px",
+              fontSize: 12,
+              fontWeight: 700,
+              background: "rgba(18,18,26,0.95)",
+              color: "#fff",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+              fontFamily: "'Segoe UI', system-ui, sans-serif",
+            }}
+          >
+            ♟️ Chess game in progress{openChessGame.status === "active" && openChessGame.currentTurn === auth.userId ? " — your move!" : ""}
+          </button>
+        </Tooltip>
+      )}
+      {/* Active-games picker: multiple pairs can each have a game running in
+          the same room — list them so anyone can resume/spectate. */}
+      {room.activeGroup &&
+        (!room.openChessGameId || room.chessMinimized) &&
+        room.chessGames.some((g) => g.status === "active") && (
+          <div
+            data-interactive
+            style={{
+              position: "fixed",
+              left: 16,
+              bottom: 150,
+              zIndex: 21400,
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+              padding: "8px 10px",
+              borderRadius: 12,
+              background: "rgba(18,18,26,0.92)",
+              color: "#fff",
+              fontSize: 11,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+              fontFamily: "'Segoe UI', system-ui, sans-serif",
+            }}
+          >
+            <strong style={{ fontSize: 10, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.5 }}>
+              ♟️ Chess games in this room
+            </strong>
+            {room.chessGames
+              .filter((g) => g.status === "active")
+              .map((g) => {
+                const iPlay = g.playerAId === auth.userId || g.playerBId === auth.userId;
+                const nameOf = (id: string) =>
+                  id === auth.userId ? "You" : room.members.find((m) => m.userId === id)?.name ?? "?";
+                return (
+                  <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ opacity: 0.85, flex: 1 }}>
+                      {nameOf(g.playerAId)} vs {nameOf(g.playerBId)}
+                    </span>
+                    <button
+                      onClick={() => room.openChessGame(g.id)}
+                      style={{
+                        cursor: "pointer",
+                        border: "none",
+                        borderRadius: 6,
+                        padding: "2px 8px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        background: iPlay ? "rgba(52,211,153,0.4)" : "rgba(96,165,250,0.3)",
+                        color: "#fff",
+                      }}
+                    >
+                      {iPlay ? "▶ Resume" : "👁 Watch"}
+                    </button>
+                  </div>
+                );
+              })}
+          </div>
+        )}
+      {/* Incoming chess challenge banner. */}
+      {room.incomingChessInvite && (
+        <div
+          data-interactive
+          style={{
+            position: "fixed",
+            bottom: 104,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 23000,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            borderRadius: 12,
+            background: "rgba(30,27,75,0.95)",
+            color: "#fff",
+            fontSize: 13,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+            fontFamily: "'Segoe UI', system-ui, sans-serif",
+          }}
+        >
+          ♟️ <strong>{room.incomingChessInvite.fromName}</strong> challenges you to chess!
+          <button
+            style={{
+              cursor: "pointer",
+              border: "none",
+              borderRadius: 7,
+              padding: "4px 10px",
+              fontSize: 12,
+              fontWeight: 700,
+              background: "rgba(52,211,153,0.85)",
+              color: "#06281c",
+            }}
+            onClick={room.acceptChessInvite}
+          >
+            Accept
+          </button>
+          <button
+            style={{
+              cursor: "pointer",
+              border: "none",
+              borderRadius: 7,
+              padding: "4px 8px",
+              fontSize: 12,
+              background: "rgba(255,255,255,0.12)",
+              color: "#fff",
+            }}
+            onClick={room.declineChessInvite}
+          >
+            Decline
+          </button>
+        </div>
+      )}
+      {/* Chess feedback notice ("already have a game", declines, ...). */}
+      {room.chessNotice && <div style={{ ...bannerStyle, top: 56 }}>♟️ {room.chessNotice}</div>}
 
       {/* Food — always mounted, positioned purely via foodX/foodY motion
           values animated by throwFood. No pointer events of its own. */}
@@ -1899,6 +2567,56 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             : "🍖 Tossing food to your pet… (right-click to cancel)"}
         </div>
       )}
+
+      {/* Poop items — drag one onto the Kitchen drawer's trash can to clean
+          it up. Native framer drag on the element itself (the proven
+          pet-drag pattern): the cursor stays over this data-interactive
+          element for the whole drag, so the hit-test keeps the window
+          clickable without needing a clickable-override. zIndex sits above
+          the Kitchen drawer's own 25000 (was 15000 — the poop rendered
+          BEHIND the drawer while dragging over it, even though the drop
+          logic worked fine). */}
+      {poops.map((p) => (
+        <Tooltip key={p.id} label="Drag me to the trash can in the Kitchen!">
+          <motion.div
+            data-interactive
+            drag
+            dragMomentum={false}
+            dragElastic={0}
+            // Continuously mirrors dropPoop's own hit-test while dragging so
+            // SideDock can enlarge/highlight the trash can the moment the
+            // poop is actually over it, not just on release.
+            onDrag={(_e, info) => setPoopOverTrash(isOverTrash(info.point.x, info.point.y))}
+            // Release trigger of record: a NATIVE window pointerup attached
+            // synchronously at grab time (framer's onDragEnd is unreliable for
+            // low-movement releases — the documented house rule from the
+            // feed/ball gestures). dropPoop's id-guard makes double-fires safe.
+            onPointerDown={() => {
+              const onUp = (ev: PointerEvent) => {
+                window.removeEventListener("pointerup", onUp);
+                dropPoop(p.id, ev.clientX, ev.clientY);
+              };
+              window.addEventListener("pointerup", onUp);
+            }}
+            onDragEnd={(_e, info) => dropPoop(p.id, info.point.x, info.point.y)}
+            initial={{ opacity: 0, y: -12, scale: 0.6 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.45, ease: "easeOut" }}
+            style={{
+              position: "fixed",
+              left: p.x,
+              top: p.y,
+              fontSize: 30,
+              zIndex: 25500,
+              cursor: "grab",
+              userSelect: "none",
+              touchAction: "none",
+            }}
+          >
+            💩
+          </motion.div>
+        </Tooltip>
+      ))}
 
       {/* Ball — same always-mounted, drag-controlled pattern as food. */}
       <motion.div
@@ -1959,30 +2677,31 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               textAlign: "center",
             }}
           >
-            <button
-              data-interactive
-              onClick={() => endCleaning(false)}
-              // Stop this mousedown from also reaching the cleaningMode
-              // effect's window-level scrub-start listener — otherwise
-              // clicking the X was also registering as the start of a scrub.
-              onMouseDown={(e) => e.stopPropagation()}
-              title="Cancel washing"
-              style={{
-                position: "absolute",
-                top: 4,
-                right: 6,
-                cursor: "pointer",
-                border: "none",
-                background: "transparent",
-                color: "#bae6fd",
-                fontSize: 14,
-                fontWeight: 900,
-                padding: 2,
-                lineHeight: 1,
-              }}
-            >
-              ✕
-            </button>
+            <Tooltip label="Cancel washing">
+              <button
+                data-interactive
+                onClick={() => endCleaning(false)}
+                // Stop this mousedown from also reaching the cleaningMode
+                // effect's window-level scrub-start listener — otherwise
+                // clicking the X was also registering as the start of a scrub.
+                onMouseDown={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  right: 6,
+                  cursor: "pointer",
+                  border: "none",
+                  background: "transparent",
+                  color: "#bae6fd",
+                  fontSize: 14,
+                  fontWeight: 900,
+                  padding: 2,
+                  lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            </Tooltip>
             Hold and scrub the pet with the sponge
             <div style={{ marginTop: 4, height: 6, borderRadius: 999, background: "rgba(0,0,0,0.3)", overflow: "hidden" }}>
               <div
@@ -2007,7 +2726,10 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               top: scrubCursor.y - 18,
               fontSize: 32,
               pointerEvents: "none",
-              zIndex: 21002,
+              // Above the pet's own container (up to 25200) so the sponge
+              // always reads as ON TOP while scrubbing, never hidden behind
+              // the pet's body when the cursor passes over it.
+              zIndex: ABOVE_PET_Z,
             }}
             animate={
               scrubHeld
@@ -2022,7 +2744,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             {bubbles.map((b) => (
               <motion.span
                 key={b.id}
-                style={{ position: "fixed", left: b.x, top: b.y, fontSize: b.size, pointerEvents: "none", zIndex: 21001 }}
+                style={{ position: "fixed", left: b.x, top: b.y, fontSize: b.size, pointerEvents: "none", zIndex: ABOVE_PET_Z - 1 }}
                 initial={{ opacity: 0.95, x: 0, y: 0, scale: 0.35, rotate: 0 }}
                 animate={{
                   opacity: [0.95, 0.84, 0.68, 0],
@@ -2062,27 +2784,28 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               textAlign: "center",
             }}
           >
-            <button
-              data-interactive
-              onClick={endWarming}
-              onMouseDown={(e) => e.stopPropagation()}
-              title="Put the light away"
-              style={{
-                position: "absolute",
-                top: 4,
-                right: 6,
-                cursor: "pointer",
-                border: "none",
-                background: "transparent",
-                color: "#fde68a",
-                fontSize: 14,
-                fontWeight: 900,
-                padding: 2,
-                lineHeight: 1,
-              }}
-            >
-              ✕
-            </button>
+            <Tooltip label="Put the light away">
+              <button
+                data-interactive
+                onClick={endWarming}
+                onMouseDown={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  right: 6,
+                  cursor: "pointer",
+                  border: "none",
+                  background: "transparent",
+                  color: "#fde68a",
+                  fontSize: 14,
+                  fontWeight: 900,
+                  padding: 2,
+                  lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            </Tooltip>
             Hold the light over the egg to warm it
             <div style={{ marginTop: 4, fontSize: 10, fontWeight: 600, opacity: 0.8 }}>
               {warmHeld
@@ -2103,7 +2826,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               width: 0,
               height: 0,
               pointerEvents: "none",
-              zIndex: 21002,
+              // Same reasoning as the sponge cursor above.
+              zIndex: ABOVE_PET_Z,
             }}
           >
             <motion.div
@@ -2168,6 +2892,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
         </motion.div>
       )}
 
+      {/* Full-window transparent backdrop while the radial menu is open —
+          clicking anywhere outside the pet/menu collapses it. Sits BELOW
+          the pet container (zIndex 100 vs the pet's elevated 500) so the
+          pet's own click and the radial actions always win. */}
+      {menuOpen && (
+        <div
+          data-interactive
+          onClick={() => setMenuOpen(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 100, background: "transparent" }}
+        />
+      )}
+
       <motion.div
         data-interactive
         style={{
@@ -2184,46 +2920,175 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           // now (see the containing-block note on the hatch stage below),
           // so their z-index only compares correctly against this
           // container's own z-index, not one set on a descendant of it.
-          zIndex: eggPhase === "burst" ? 945 : undefined,
+          // Elevated above the outside-click backdrop (100) while the menu
+          // is open so pet/radial clicks never fall through to it.
+          // Pet renders ABOVE the dock/menus (25000) in normal play — but
+          // never above an active minigame overlay (Chess 21500 / Toss
+          // 22000 are deliberately modal; inMinigame keeps the pet behind
+          // them by falling back to auto stacking), and the mid-hatch 945
+          // is untouched (it's sandwiched between the hatch stage's
+          // carefully-ordered 940/950 sibling layers). Dragged items still
+          // win over the pet: poop 25500, food/ball 26000. Known tradeoff:
+          // where the pet visually overlaps an open dock panel, useHitTest
+          // resolves the PET at those pixels — flagged for manual testing,
+          // mitigate only if it proves a real nuisance.
+          //
+          // While NESTED this container sits right on top of the dock (its
+          // real screen position is the nest slot, inside the Home panel),
+          // and it's invisible but was still hit-testable — silently
+          // swallowing clicks meant for the ribbon/panel beneath it (the
+          // reported "can't click Quests / can't collapse the ribbon while
+          // the pet is home" bug). `pointer-events: none` removes it from
+          // `elementFromPoint` entirely, so the dock underneath resolves
+          // correctly; the dropped zIndex is belt-and-suspenders.
+          zIndex: eggPhase === "burst" ? 945 : petNested ? undefined : inMinigame ? undefined : menuOpen ? 25200 : 25100,
+          pointerEvents: petNested ? "none" : undefined,
         }}
-        {...(save.isAlive && !petBusy && !inMinigame ? petDragHandlers : {})}
+        {...(save.isAlive && !petBusy && !inMinigame && !petNested ? petDragHandlers : {})}
       >
+        {/* update_ready notice — same "the pet tells you" toast spot as the
+            friend/room-invite kinds, but LOCAL-ONLY (synthesized from
+            appUpdate state, never sent via sendTo/broadcast), with NO TTL
+            auto-clear and directly actionable: "Update now" installs right
+            here, "Later" dismisses (a tab badge then persists as a
+            reminder). Sits a step above the normal toast slot so the two
+            can coexist. */}
+        {showUpdateToast && (
+          <div
+            data-interactive
+            style={{
+              position: "absolute",
+              bottom: PET_SIZE + 48,
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 12,
+              padding: "6px 10px",
+              borderRadius: 12,
+              background: "rgba(240,253,244,0.98)",
+              color: "#14532d",
+              boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+              whiteSpace: "nowrap",
+              zIndex: 6,
+              fontFamily: "'Segoe UI', system-ui, sans-serif",
+              // Explicit override: the ancestor pet container goes
+              // pointer-events:none while nested, but an update notice must
+              // stay clickable regardless of the pet's own state.
+              pointerEvents: "auto",
+            }}
+          >
+            <span>
+              ⬆️ Update {appUpdate.updateVersion ? `v${appUpdate.updateVersion} ` : ""}is ready!
+            </span>
+            <Tooltip label="Restart and install the update now">
+              <button
+                onClick={appUpdate.installUpdate}
+                style={{
+                  cursor: "pointer",
+                  border: "none",
+                  borderRadius: 7,
+                  padding: "3px 9px",
+                  fontSize: 11,
+                  fontWeight: 800,
+                  background: "#22c55e",
+                  color: "#052e12",
+                }}
+              >
+                Update now
+              </button>
+            </Tooltip>
+            <Tooltip label="Not now — a badge on the dock tab will remind you">
+              <button
+                onClick={() => setUpdateToastDismissed(true)}
+                style={{
+                  cursor: "pointer",
+                  border: "none",
+                  borderRadius: 7,
+                  padding: "3px 8px",
+                  fontSize: 11,
+                  background: "rgba(20,83,45,0.12)",
+                  color: "#14532d",
+                }}
+              >
+                Later
+              </button>
+            </Tooltip>
+          </div>
+        )}
+
         {/* Notification bubble — the pet "tells" you about friend requests /
             accepts / room invites. Same look as the chat bubble but clickable
             (opens the dock at the relevant view) and independent of any room. */}
         {notifications.toast && (
-          <div
-            data-interactive
-            onClick={() => {
-              openDockAt(notifications.toast!.kind === "room_invite" ? "groups" : "friends");
-              notifications.dismissToast();
-            }}
-            title="Open"
-            style={{
-              position: "absolute",
-              bottom: PET_SIZE + 6,
-              left: "50%",
-              transform: "translateX(-50%)",
-              maxWidth: 240,
-              fontSize: 12,
-              padding: "6px 10px",
-              borderRadius: 12,
-              background: "rgba(255,255,255,0.97)",
-              color: "#1f2937",
-              cursor: "pointer",
-              boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              zIndex: 5,
-            }}
-          >
-            {notifications.toast.kind === "friend_request"
-              ? `🤝 ${notifications.toast.fromName} sent you a friend request!`
-              : notifications.toast.kind === "friend_accepted"
-                ? `🎉 ${notifications.toast.fromName} accepted your friend request!`
-                : `🌐 ${notifications.toast.fromName} invited you to ${notifications.toast.groupName ?? "a room"}!`}
-          </div>
+          <Tooltip label="Open">
+            <div
+              data-interactive
+              onClick={() => {
+                const note = notifications.toast!;
+                notifications.dismissToast();
+                // Chess poke / your-turn deep-link: switch into that room
+                // (joining its channel if needed) and open that specific
+                // game — leaving the current room this way never forfeits
+                // anything.
+                if (note.kind === "chess_poke" || note.kind === "chess_turn") {
+                  if (note.groupId) {
+                    const known = groupsApi.groups.find((g) => g.id === note.groupId);
+                    if (known && room.activeGroup?.id !== note.groupId) {
+                      room.join(known);
+                      dbg(`joined room ${known.name} via chess ${note.kind === "chess_poke" ? "poke" : "turn"} toast`);
+                    }
+                  }
+                  if (note.gameId) room.openChessGame(note.gameId);
+                  return;
+                }
+                openDockAt(note.kind === "room_invite" ? "groups" : "friends");
+              }}
+              style={{
+                position: "absolute",
+                bottom: PET_SIZE + 6,
+                left: "50%",
+                transform: "translateX(-50%)",
+                // Sized to fit the message instead of a fixed box that
+                // truncated longer text with an ellipsis: a sane max width so
+                // it never spans the whole screen, but wraps onto as many
+                // lines as it needs rather than cutting anything off.
+                maxWidth: 280,
+                width: "max-content",
+                fontSize: 12,
+                padding: "6px 10px",
+                borderRadius: 12,
+                background: "rgba(255,255,255,0.97)",
+                color: "#1f2937",
+                cursor: "pointer",
+                boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+                whiteSpace: "normal",
+                wordBreak: "break-word",
+                zIndex: 5,
+                // Same override as the update toast — must stay clickable
+                // even while the ancestor pet container is pointer-events:none.
+                pointerEvents: "auto",
+              }}
+            >
+              {notifications.toast.kind === "friend_request" ? (
+                `🤝 ${notifications.toast.fromName} sent you a friend request!`
+              ) : notifications.toast.kind === "friend_accepted" ? (
+                `🎉 ${notifications.toast.fromName} accepted your friend request!`
+              ) : notifications.toast.kind === "chess_poke" || notifications.toast.kind === "chess_turn" ? (
+                // Explicit "tap me" affordance — an overlay bubble's hover
+                // tooltip is not discoverable enough for the deep-link.
+                <>
+                  {notifications.toast.kind === "chess_poke"
+                    ? `♟️ ${notifications.toast.fromName} poked you — it's your move! `
+                    : `♟️ ${notifications.toast.fromName} made their move — it's your turn! `}
+                  <span style={{ textDecoration: "underline", fontWeight: 700 }}>🔗 Tap to jump back in</span>
+                </>
+              ) : (
+                `🌐 ${notifications.toast.fromName} invited you to ${notifications.toast.groupName ?? "a room"}!`
+              )}
+            </div>
+          </Tooltip>
         )}
 
         {/* My own room chat bubble + emote, mirroring what friends see. */}
@@ -2234,7 +3099,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               bottom: PET_SIZE + 6,
               left: "50%",
               transform: "translateX(-50%)",
-              maxWidth: 220,
+              maxWidth: 260,
+              width: "max-content",
               fontSize: 12,
               padding: "6px 10px",
               borderRadius: 12,
@@ -2242,9 +3108,8 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
               color: "#1f2937",
               pointerEvents: "none",
               boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
+              whiteSpace: "normal",
+              wordBreak: "break-word",
             }}
           >
             {room.bubbles[auth.userId]!.text}
@@ -2327,7 +3192,7 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
             alignItems: "center",
             justifyContent: "center",
             userSelect: "none",
-            pointerEvents: hatchCutsceneActive && eggPhase !== "burst" ? "none" : "auto",
+            pointerEvents: (hatchCutsceneActive && eggPhase !== "burst") || petNested ? "none" : "auto",
             x: leanX,
             y: leanY,
             scaleX: movement.facing === "left" ? -1 : 1,
@@ -2344,7 +3209,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
                 0.7 with no mount animation. */}
             <motion.div
               initial={false}
-              animate={{ scale: game.isEgg || hatchCutsceneActive ? 1 : PET_DISPLAY_SCALE }}
+              // Pet-size setting multiplies the base display scale — 100%
+              // preserves today's exact look, lower values only shrink
+              // (shrink-only by design; composes fine with the separate
+              // idle-breathing wrapper nested inside). petNested drives the
+              // "going into the nest" exit: shrink to 0 + fade, and the
+              // roaming pet stays hidden until the nest slot releases it.
+              animate={{
+                scale:
+                  (game.isEgg || hatchCutsceneActive ? 1 : PET_DISPLAY_SCALE * (prefs.petScale / 100)) *
+                  (petNested ? 0 : 1),
+                opacity: petNested ? 0 : 1,
+              }}
               transition={{ type: "spring", stiffness: 60, damping: 15 }}
               style={{
                 width: PET_SIZE,
@@ -2355,7 +3231,26 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
                 transformOrigin: "center",
               }}
             >
-              {visual}
+              {/* Idle-liveliness node: framer-motion breathing squash +
+                  gesture tilt own THIS wrapper's transform exclusively —
+                  separate from both bodyClass's CSS keyframes and the
+                  display-scale spring above, so nothing fights. Feet-
+                  planted origin so the breath reads as a chest rise. */}
+              <motion.div
+                style={{
+                  width: PET_SIZE,
+                  height: PET_SIZE,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  scaleX: breatheScaleX,
+                  scaleY: breatheScaleY,
+                  rotate: gestureRotate,
+                  transformOrigin: "center bottom",
+                }}
+              >
+                {visual}
+              </motion.div>
             </motion.div>
             <PetEffects
               trigger={fxTrigger}

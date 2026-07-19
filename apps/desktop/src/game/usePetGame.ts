@@ -22,6 +22,7 @@ import {
   normalizePetQuestState,
   normalizePetSave,
   normalizeQuestPeriods,
+  POOP_RULES,
   proportionalPoints,
   recordCareActionQuestProgress,
   recordThrowBallQuestProgress,
@@ -115,6 +116,9 @@ export interface PetGame {
   wash: () => void;
   pet: () => void;
   throwBall: () => void;
+  /** Cleaned up a poop (dragged to the trash can): small happiness +
+   *  care-point bump, counts toward the cloud-synced poopCleanedCount. */
+  cleanPoop: () => void;
   hatchOrEvolve: () => void;
   toggleSleep: () => void;
   restart: () => void;
@@ -355,7 +359,7 @@ export function usePetGame(userId: string | null): PetGame {
       basePoints: number,
       bonusCategory: "feed" | "wash" | "play",
       label: string,
-      counter?: "feedCount" | "washCount" | "petCount" | "throwBallCount",
+      counter?: "feedCount" | "washCount" | "petCount" | "throwBallCount" | "poopCleanedCount",
       recordQuests?: (next: PetSaveData, now: Date, statBefore: number) => PetSaveData,
     ) => {
       setSave((prev) => {
@@ -543,6 +547,20 @@ export function usePetGame(userId: string | null): PetGame {
     () =>
       careAction("happiness", 15, 4, "play", "Played fetch", "throwBallCount", (next, now) =>
         recordThrowBallQuestProgress(next, now, calendar),
+      ),
+    [careAction],
+  );
+  // Deliberately smaller than a full feed/wash/pet action (tunable
+  // placeholder numbers live in pet-core's POOP_RULES). No quest hook.
+  const cleanPoop = useCallback(
+    () =>
+      careAction(
+        "happiness",
+        POOP_RULES.happinessBonus,
+        POOP_RULES.basePoints,
+        "wash",
+        "Cleaned up poop",
+        "poopCleanedCount",
       ),
     [careAction],
   );
@@ -840,6 +858,7 @@ export function usePetGame(userId: string | null): PetGame {
     wash,
     pet,
     throwBall,
+    cleanPoop,
     hatchOrEvolve,
     toggleSleep,
     restart,

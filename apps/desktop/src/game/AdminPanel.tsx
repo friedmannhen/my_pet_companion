@@ -5,6 +5,7 @@ import { useState } from "react";
 import { DEFAULT_PET_RULES, freshPetSave, type PetSaveData } from "@pet/core";
 import type { PetGame } from "./usePetGame";
 import type { Consumables } from "./useConsumables";
+import { Tooltip } from "./Tooltip";
 
 const T = DEFAULT_PET_RULES.evolutionThresholds;
 
@@ -237,13 +238,14 @@ export function AdminPanel({ game, consumables }: { game: PetGame; consumables: 
           </div>
         </div>
       )}
-      <button
-        style={{ ...btn, width: 34, height: 30, textAlign: "center", opacity: 0.8 }}
-        onClick={() => setOpen((o) => !o)}
-        title="Dev admin panel"
-      >
-        🛠️
-      </button>
+      <Tooltip label="Dev admin panel">
+        <button
+          style={{ ...btn, width: 34, height: 30, textAlign: "center", opacity: 0.8 }}
+          onClick={() => setOpen((o) => !o)}
+        >
+          🛠️
+        </button>
+      </Tooltip>
     </div>
   );
 }

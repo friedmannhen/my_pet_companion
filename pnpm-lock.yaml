@@ -37,6 +37,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.110.1
         version: 2.110.1
+      chess.js:
+        specifier: ^1.4.0
+        version: 1.4.0
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
@@ -831,6 +834,9 @@ packages:
   check-error@2.1.3:
     resolution: {integrity: sha512-PAJdDJusoxnwm1VwW07VWwUN1sl7smmC3OKggvndJFadxxDRyFJBX/ggnu/KE4kQAB7a3Dp8f/YXC1FlUprWmA==}
     engines: {node: '>= 16'}
+
+  chess.js@1.4.0:
+    resolution: {integrity: sha512-BBJgrrtKQOzFLonR0l+k64A98NLemPwNsCskwb+29bRwobUa4iTm51E1kwGPbWXAcfdDa18nad6vpPPKPWarqw==}
 
   chownr@3.0.0:
     resolution: {integrity: sha512-+IxzY9BZOQd/XuYPRmrvEVjF/nqj5kgT4kEq7VofrDoM1MxoRjEWkrCC3EtLi59TVawxTAn+orJwFQcrqEN1+g==}
@@ -2689,6 +2695,8 @@ snapshots:
       supports-color: 7.2.0
 
   check-error@2.1.3: {}
+
+  chess.js@1.4.0: {}
 
   chownr@3.0.0: {}
 

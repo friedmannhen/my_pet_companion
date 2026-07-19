@@ -1,6 +1,7 @@
 // Shared pet visuals: the cat is the only type with real art (MVP roster);
 // every other type renders as an emoji stand-in until its sheets land.
 // Used by both the local pet (GameView) and remote pets in online rooms.
+import eggIdle from "../assets/pets/black_cat/egg/1.png";
 import babyBody from "../assets/pets/black_cat/baby/baby_body.png";
 import babyTail from "../assets/pets/black_cat/baby/baby_tail.png";
 import catAdult from "../assets/pets/black_cat/black_cat_adult.png";
@@ -17,6 +18,11 @@ import catFinalSleep from "../assets/pets/black_cat/black_cat__final_sleep.png";
 // tail remotely — the wink overlay is local-only since remote pets don't
 // track the other player's blink state).
 export const CAT_SPRITES: Record<number, { idle: string; blink: string; sleep?: string }> = {
+  // Stage 0 (egg) never appears in the online contexts spriteFor otherwise
+  // serves (eggs can't go online, see the pet-game-online skill) — this
+  // entry exists solely so the LOCAL Home nest slot's NestedPetSprite can
+  // show the real egg art instead of falling back to a plain cat emoji.
+  0: { idle: eggIdle, blink: eggIdle },
   1: { idle: babyBody, blink: babyBody },
   2: { idle: catAdult, blink: catAdultBlink },
   3: { idle: catFinal, blink: catFinalBlink, sleep: catFinalSleep },

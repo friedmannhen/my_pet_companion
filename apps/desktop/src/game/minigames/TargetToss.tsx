@@ -23,6 +23,7 @@ import {
 } from "@pet/core";
 import { slidePuck, slideDuration, velocityForDistance } from "../curlPhysics";
 import { spriteFor, emojiFor } from "../petSprites";
+import { Tooltip } from "../Tooltip";
 import { TOSS_TURN_TIMEOUT_MS, type RoomApi, type TossThrowFx } from "../../online/useRoom";
 
 // Arena geometry (fractions of the window, so every screen sees the same
@@ -110,7 +111,18 @@ function PuckSprite({ petType, stage, opacity = 1 }: { petType: string; stage: n
   );
 }
 
-export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: string; mySave: PetSaveData }) {
+export function TargetToss({
+  room,
+  userId,
+  mySave,
+  onForfeit,
+}: {
+  room: RoomApi;
+  userId: string;
+  mySave: PetSaveData;
+  /** "Give up" — the caller records my loss, then forfeits via the room. */
+  onForfeit: () => void;
+}) {
   const game = room.tossGame!;
   const turn = currentTossTurn(game.core);
   const myTurn = turn?.userId === userId;
@@ -192,6 +204,9 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
     aim.active = false;
     setAiming(false);
     setPull({ dx: 0, dy: 0 });
+    // Tell viewers the pull ended (their preview clears; the throw event
+    // itself also clears it, this covers the no-throw/stray-click case).
+    room.clearTossAim();
     const pullLen = Math.hypot(aim.dx, aim.dy);
     if (pullLen < 12) return; // a stray click, not a real pull — no throw
     const { x: toX, y: toY, v0 } = stopPointFor(aim.dx, aim.dy);
@@ -220,6 +235,9 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
       aim.dx = e.clientX - aim.startX;
       aim.dy = e.clientY - aim.startY;
       setPull({ dx: aim.dx, dy: aim.dy });
+      // Live pull preview for everyone else — normalized to viewport
+      // fractions (the `pos` convention); throttled inside sendTossAim.
+      room.sendTossAim(aim.dx / window.innerWidth, aim.dy / window.innerHeight);
     };
     const onUp = () => releaseAim();
     window.addEventListener("mousemove", onMove);
@@ -228,7 +246,7 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [myTurn, over, gettingReady, releaseAim]);
+  }, [myTurn, over, gettingReady, releaseAim, room]);
 
   // ── Slide replay + deferred reveal ────────────────────────────────────────
   // Distance/marker/toast are only shown AFTER the puck visually stops
@@ -337,19 +355,19 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
       {visibleMarkers.map((m, i) => {
         const info = petInfoFor(m.userId);
         return (
-          <div
-            key={`${m.userId}-${i}`}
-            title={`${nameOf(m.userId)} — ${m.distance} from center`}
-            style={{
-              position: "absolute",
-              left: m.nx * window.innerWidth - PUCK_SIZE / 2,
-              top: m.ny * window.innerHeight - PUCK_SIZE / 2,
-              zIndex: 3,
-              filter: m.userId === userId ? "drop-shadow(0 0 5px rgba(52,211,153,0.9))" : "drop-shadow(0 0 5px rgba(96,165,250,0.9))",
-            }}
-          >
-            <PuckSprite petType={info.petType} stage={info.stage} />
-          </div>
+          <Tooltip key={`${m.userId}-${i}`} label={`${nameOf(m.userId)} — ${m.distance} from center`}>
+            <div
+              style={{
+                position: "absolute",
+                left: m.nx * window.innerWidth - PUCK_SIZE / 2,
+                top: m.ny * window.innerHeight - PUCK_SIZE / 2,
+                zIndex: 3,
+                filter: m.userId === userId ? "drop-shadow(0 0 5px rgba(52,211,153,0.9))" : "drop-shadow(0 0 5px rgba(96,165,250,0.9))",
+              }}
+            >
+              <PuckSprite petType={info.petType} stage={info.stage} />
+            </div>
+          </Tooltip>
         );
       })}
 
@@ -384,7 +402,19 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
               <PuckSprite petType={mySave.petType} stage={mySave.evolutionStage} />
             </div>
           ) : (
-            <PuckSprite {...petInfoFor(turn.userId)} opacity={0.6} />
+            // Viewers see the active player's live pull-back mirrored on
+            // their puck (same displacement math as the local aim above),
+            // so the wind-up reads in real time, not just the release.
+            <div
+              style={{
+                transform:
+                  room.tossAim?.userId === turn.userId
+                    ? `translate(${room.tossAim.dxN * window.innerWidth * 0.35}px, ${room.tossAim.dyN * window.innerHeight * 0.35}px)`
+                    : undefined,
+              }}
+            >
+              <PuckSprite {...petInfoFor(turn.userId)} opacity={0.6} />
+            </div>
           ))}
       </div>
 
@@ -434,20 +464,6 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
                 />
               );
             })}
-          </div>
-          <div
-            style={{
-              position: "absolute",
-              left: lp.x + 40,
-              top: lp.y - 62,
-              fontSize: 10,
-              fontWeight: 800,
-              color: powerPct > 0.85 ? "#f87171" : "#fde68a",
-              textShadow: "0 2px 4px rgba(0,0,0,0.8)",
-              pointerEvents: "none",
-            }}
-          >
-            {powerPct > 0.85 ? "TOO HARD!" : "POWER"}
           </div>
         </>
       )}
@@ -515,23 +531,45 @@ export function TargetToss({ room, userId, mySave }: { room: RoomApi; userId: st
             </span>
           </span>
         )}
-        <button
-          title="How to play"
-          onClick={() => setShowHelp((s) => !s)}
-          style={{
-            cursor: "pointer",
-            border: "none",
-            borderRadius: "50%",
-            width: 22,
-            height: 22,
-            fontSize: 12,
-            fontWeight: 900,
-            background: showHelp ? "rgba(52,211,153,0.5)" : "rgba(255,255,255,0.15)",
-            color: "#fff",
-          }}
-        >
-          ?
-        </button>
+        {/* Give up — decisive (my loss); remaining players play on, and a
+            lone remaining player wins outright. */}
+        {!over && game.core.order.includes(userId) && !game.forfeited.includes(userId) && (
+          <Tooltip label="Concede — counts as a loss for you; the others play on">
+            <button
+              onClick={onForfeit}
+              style={{
+                cursor: "pointer",
+                border: "1px solid rgba(248,113,113,0.4)",
+                borderRadius: 8,
+                padding: "3px 10px",
+                fontSize: 11,
+                fontWeight: 700,
+                background: "rgba(248,113,113,0.15)",
+                color: "#fca5a5",
+              }}
+            >
+              🏳️ Give up
+            </button>
+          </Tooltip>
+        )}
+        <Tooltip label="How to play">
+          <button
+            onClick={() => setShowHelp((s) => !s)}
+            style={{
+              cursor: "pointer",
+              border: "none",
+              borderRadius: "50%",
+              width: 22,
+              height: 22,
+              fontSize: 12,
+              fontWeight: 900,
+              background: showHelp ? "rgba(52,211,153,0.5)" : "rgba(255,255,255,0.15)",
+              color: "#fff",
+            }}
+          >
+            ?
+          </button>
+        </Tooltip>
       </div>
 
       {showHelp && (

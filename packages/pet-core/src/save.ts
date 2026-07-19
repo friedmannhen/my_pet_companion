@@ -173,6 +173,7 @@ export function normalizePetSave(
   return {
     ...save,
     petType: type,
+    poopCleanedCount: save.poopCleanedCount ?? 0,
     hatched: save.hatched ?? (save.carePoints ?? 0) >= 200,
     // Saves that predate the egg-picker already have a pet in progress — only
     // a genuinely fresh save (freshPetSave) starts with eggChosen: false.
@@ -238,6 +239,7 @@ export function freshPetSave(
     petCount: 0,
     throwBallCount: 0,
     overfeedCount: 0,
+    poopCleanedCount: 0,
     birthDate: n,
     lastDecayTick: n,
     lastFed: n,

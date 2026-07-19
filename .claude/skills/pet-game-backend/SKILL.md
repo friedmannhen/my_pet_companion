@@ -137,6 +137,39 @@ search_path. Deferred advisor items (perf-at-scale lint only):
 now linked on this machine — `npx supabase migration list --linked` /
 `db query --linked -f file.sql` work; `db push` needs the user's go-ahead.
 
+## Chess (`chess_games`, migration `20260716010000`) — Jul 2026
+
+One row per untimed 1:1 game, stored against the group whose room started
+it. Columns: `player_a_id` (WHITE, the challenger) / `player_b_id` (BLACK),
+`board_fen`, `move_history jsonb` (SAN array — resume-of-record),
+`current_turn`, `status ('active'|'finished'|'abandoned')`, `winner_id`,
+`result_reason ('checkmate'|'resignation'|'draw'|'mutual_cancel'|
+'opponent_unreachable')`. Key shapes:
+- **Spectator SELECT uses `is_group_member(group_id)`** — NOT
+  `shares_group_with(...)`, which takes a USER id; passing a group id would
+  silently never match (this exact mistake is called out in the plan).
+- **One active game per pair**: partial unique index on
+  `(least(a,b), greatest(a,b)) where status='active'`. The client
+  pre-checks for a friendly message; insert error 23505 is the enforcement.
+- **Turn-ownership RLS**: the update policy's USING clause requires
+  `auth.uid() = current_turn` on the EXISTING row — so only the mover can
+  write moves (legality itself is client-side chess.js; flagged MVP trust
+  tradeoff). Because of that, resign/cancel (which must work OFF-turn) go
+  through SECURITY DEFINER RPCs: `resign_chess_game(p_game_id)` (decisive:
+  status finished, winner = opponent, reason resignation) and
+  `cancel_chess_game(p_game_id, p_reason)` (status abandoned, NO score
+  impact; reason mutual_cancel or opponent_unreachable — the 48h
+  unreachable grace is gated client-side, MVP trust).
+- minigame_scores gains game_code `'chess'` (games_won ranking; each
+  player's own client records on decisive endings only — abandoned games
+  record nothing).
+
+Migration `20260716000000` adds `pets.poop_cleaned_count integer not null
+default 0` (rides the existing table grant + row upsert like every other
+counter). **Both Jul-16 migrations may not be pushed yet — if pets-row
+upserts suddenly fail with an unknown-column error, check
+`npx supabase migration list --linked` first.**
+
 ## Edge Functions (`supabase/functions/`, Deno) — the session-lease system
 
 Enforces "only one active device per account." `_shared/lease.ts`:

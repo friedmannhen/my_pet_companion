@@ -6,6 +6,7 @@
 // wash-scrub and the settings inputs.
 import { useEffect, useRef, useState } from "react";
 import { BATTLE_ROUND_MS, BATTLE_VERDICT_MS, type RoomApi } from "./useRoom";
+import { Tooltip } from "../game/Tooltip";
 
 const EMOTES = ["👋", "❤️", "😂", "😮", "😢", "🎉"];
 
@@ -383,25 +384,32 @@ export function RoomBar({ room }: { room: RoomApi }) {
         </span>
         <span style={{ width: 1, height: 16, background: "rgba(255,255,255,0.15)" }} />
         {EMOTES.map((e) => (
-          <button key={e} style={{ ...barBtn, padding: "3px 5px" }} title="Send emote" onClick={() => room.sendEmote(e)}>
-            {e}
-          </button>
+          <Tooltip key={e} label="Send emote">
+            <button style={{ ...barBtn, padding: "3px 5px" }} onClick={() => room.sendEmote(e)}>
+              {e}
+            </button>
+          </Tooltip>
         ))}
         <span style={{ width: 1, height: 16, background: "rgba(255,255,255,0.15)" }} />
-        <button
-          style={barBtn}
-          title={room.minigameLobby || room.tossGame ? "A game is already going" : "Mini-games"}
-          disabled={!!room.minigameLobby || !!room.tossGame}
-          onClick={() => setGamePickerOpen((o) => !o)}
-        >
-          🎯
-        </button>
-        <button style={barBtn} title="Chat" onClick={() => setChatOpen((o) => !o)}>
-          💬
-        </button>
-        <button style={{ ...barBtn, background: "rgba(248,113,113,0.3)" }} title="Leave room" onClick={room.leaveRoom}>
-          Leave
-        </button>
+        <Tooltip label={room.minigameLobby || room.tossGame ? "A game is already going" : "Mini-games"}>
+          <button
+            style={barBtn}
+            disabled={!!room.minigameLobby || !!room.tossGame}
+            onClick={() => setGamePickerOpen((o) => !o)}
+          >
+            🎯
+          </button>
+        </Tooltip>
+        <Tooltip label="Chat">
+          <button style={barBtn} onClick={() => setChatOpen((o) => !o)}>
+            💬
+          </button>
+        </Tooltip>
+        <Tooltip label="Leave room">
+          <button style={{ ...barBtn, background: "rgba(248,113,113,0.3)" }} onClick={room.leaveRoom}>
+            Leave
+          </button>
+        </Tooltip>
       </div>
     </div>
   );

@@ -89,7 +89,13 @@ const PRESETS: Preset[] = [
       }),
   },
   {
-    label: "🪦 Dead",
+    // Hard death was removed (Phase C, plan-deathDecayMinigameBalance.md) —
+    // hunger clamps at 0 and stays interactive instead of ending the save,
+    // so this preset previews that distressed state directly (isAlive:
+    // false is no longer reachable from normal play; the one remaining
+    // isAlive:false path is a legacy pre-Phase-C save, auto-revived on load
+    // by usePetGame.ts's reviveIfDead — nothing left to preview there).
+    label: "😢 Distressed (hunger 0)",
     build: () =>
       freshPetSave({
         petType: "cat",
@@ -98,7 +104,6 @@ const PRESETS: Preset[] = [
         carePoints: T[2] + 100,
         carePointsFloor: T[2],
         hunger: 0,
-        isAlive: false,
       }),
   },
 ];

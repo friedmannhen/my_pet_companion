@@ -115,6 +115,10 @@ export interface OfflineReplayResult {
   cleanliness: number;
   happiness: number;
   carePoints: number;
+  /** Always true (Phase C, plan-deathDecayMinigameBalance.md: hard death was
+   *  removed — hunger/warmth clamp at 0 instead of ending the save). Kept on
+   *  the result shape for API stability; see PetSaveData.isAlive for the
+   *  legacy-save revival note. */
   isAlive: boolean;
   isSleeping: boolean;
   sleepKind?: "manual" | "auto";
@@ -125,14 +129,78 @@ export interface OfflineReplayResult {
 }
 
 /**
+ * How many of a segment's `minutes` a stat actually spent sitting at
+ * exactly 0, given it started the segment at `startValue` and decays
+ * linearly at `ratePerMin` (0 = frozen this segment — e.g. cleanliness/
+ * happiness during sleep). A stat that starts and stays above 0 the whole
+ * segment contributes 0; one that was already at 0 the whole time
+ * contributes the full segment.
+ */
+function minutesAtZero(startValue: number, ratePerMin: number, minutes: number): number {
+  if (minutes <= 0) return 0;
+  if (ratePerMin <= 0) return startValue <= 0 ? minutes : 0;
+  const timeToZero = startValue / ratePerMin;
+  return Math.max(0, minutes - timeToZero);
+}
+
+/**
+ * A segment's neglect care-point cost (2026-07-20 rebalance,
+ * plan-deathDecayMinigameBalance.md follow-up): care points now drain ONLY
+ * for the minutes a stat sat at exactly 0 — a stat that's merely low costs
+ * nothing. Computed from the segment's START values (not end-state) so a
+ * stat that only bottoms out partway through a long segment is charged
+ * only for the sliver of time it was actually empty, at
+ * `rules.carePointDecay.perMinutePerZeroStat` per empty stat (summed
+ * across all three: careNeed, cleanliness, happiness).
+ */
+function segmentZeroStatPenalty(
+  startStats: DecayableStats,
+  careNeedStart: number,
+  minutes: number,
+  kind: "awake" | "sleep",
+  rules: PetRuntimeRules,
+): number {
+  if (minutes <= 0) return 0;
+  const careRate = kind === "sleep" ? rules.sleepDecay.hunger : rules.decay.hunger;
+  const cleanRate = kind === "sleep" ? 0 : rules.decay.cleanliness;
+  const happyRate = kind === "sleep" ? 0 : rules.decay.happiness;
+  const zeroMinutes =
+    minutesAtZero(careNeedStart, careRate, minutes) +
+    minutesAtZero(startStats.cleanliness, cleanRate, minutes) +
+    minutesAtZero(startStats.happiness, happyRate, minutes);
+  return zeroMinutes * rules.carePointDecay.perMinutePerZeroStat;
+}
+
+/**
+ * Applies protected (manual tuck-in) sleep's floor to a decaying careNeed
+ * value: decays toward `floor` and stops there — UNLESS the stat already
+ * started the segment at or below the floor, in which case protection just
+ * freezes it exactly where it was (never raises it up to the floor).
+ */
+function protectedFloorValue(start: number, decayed: number, floor: number): number {
+  const effectiveFloor = start <= floor ? start : floor;
+  return Math.max(effectiveFloor, decayed);
+}
+
+/**
  * Replays a closed-app gap in real segments instead of applying a single decay
  * rate to the whole gap: awake decay only continues until auto-sleep would
  * have kicked in (autoSleepMs after the last interaction), then sleep decay
- * takes over; a manual "tuck-in" sleep stays frozen until its protection
- * window elapses, after which normal sleep decay (and death) resumes.
+ * takes over; a manual "tuck-in" sleep decays hunger toward (but never past)
+ * `protectedStatFloor` until its protection window elapses, after which
+ * normal (unfloored) sleep decay resumes for the remainder. Hunger (or egg
+ * warmth) clamps at 0 and stays there — it no longer ends the save.
+ *
+ * Care points only drain for the minutes a stat spent sitting at exactly 0
+ * (2026-07-20 rebalance) — a merely-low stat costs nothing, and protected
+ * sleep's floor keeps hunger above 0 the whole protected portion, so it
+ * costs nothing either. Still bounded below by carePointsFloor.
  *
  * Returns null when the gap is under a minute (the live tick handles it) or
- * the pet is already dead.
+ * `prev.isAlive` is already false — a state that should no longer occur for
+ * any save produced by this function, but is preserved as a defensive no-op
+ * for a legacy save from before hard death was removed; callers are
+ * responsible for reviving such a save once, on load (see usePetGame.ts).
  */
 export function replayOfflineGap(
   prev: PetSaveData,
@@ -152,10 +220,10 @@ export function replayOfflineGap(
     cleanliness: prev.cleanliness,
     happiness: prev.happiness,
   };
-  let isAlive = true;
   let sleepingAtEnd = prev.isSleeping;
   let sleepKindAtEnd = prev.sleepKind;
   let sleepStartedAtEnd = prev.sleepStartedAt;
+  let penaltyAccum = 0;
 
   // Eggs don't sleep. After the attended window (autoSleepMs of idle) an egg
   // goes DORMANT instead: it keeps cooling at the same gentle rate sleep
@@ -166,19 +234,19 @@ export function replayOfflineGap(
     const idleAtClose = lastTick - new Date(prev.lastInteraction ?? prev.lastFed).getTime();
     const msUntilDormant = prev.isSleeping ? 0 : Math.max(0, rules.autoSleepMs - idleAtClose);
     const attendedMs = Math.min(totalMs, msUntilDormant);
-    stats = applyOfflineDecay(stats, true, attendedMs / 60_000, "awake", rules);
-    stats = applyOfflineDecay(stats, true, (totalMs - attendedMs) / 60_000, "sleep", rules);
+    const dormantMs = totalMs - attendedMs;
 
-    const mins = totalMs / 60_000;
-    const penaltyRate =
-      (stats.warmth < 20 ? 0.5 : 0) +
-      (stats.cleanliness < 20 ? 0.3 : 0) +
-      (stats.happiness < 20 ? 0.2 : 0);
+    penaltyAccum += segmentZeroStatPenalty(stats, stats.warmth, attendedMs / 60_000, "awake", rules);
+    stats = applyOfflineDecay(stats, true, attendedMs / 60_000, "awake", rules);
+
+    penaltyAccum += segmentZeroStatPenalty(stats, stats.warmth, dormantMs / 60_000, "sleep", rules);
+    stats = applyOfflineDecay(stats, true, dormantMs / 60_000, "sleep", rules);
+
     const floor = prev.carePointsFloor ?? 0;
     const carePoints =
       computeCanEvolve(prev, rules) || rules.progression.disableCarePointDecay
         ? prev.carePoints
-        : Math.max(floor, prev.carePoints - penaltyRate * mins);
+        : Math.max(floor, prev.carePoints - penaltyAccum);
 
     return {
       hunger: stats.hunger,
@@ -192,7 +260,7 @@ export function replayOfflineGap(
       sleepKind: undefined,
       sleepStartedAt: undefined,
       lastDecayTick: now.toISOString(),
-      elapsedMinutes: Math.floor(mins),
+      elapsedMinutes: Math.floor(totalMs / 60_000),
     };
   }
 
@@ -204,55 +272,53 @@ export function replayOfflineGap(
       new Date(prev.sleepStartedAt!).getTime() + rules.sleep.protectedMaxMs;
     const frozenMs = Math.max(0, Math.min(totalMs, protectedUntil - lastTick));
     const remainderMs = totalMs - frozenMs;
-    // Frozen segment: stats untouched, floored if already below the protection floor.
-    stats = {
-      hunger: Math.max(stats.hunger, rules.sleep.protectedStatFloor),
-      warmth: Math.max(stats.warmth, rules.sleep.protectedStatFloor),
-      cleanliness: Math.max(stats.cleanliness, rules.sleep.protectedStatFloor),
-      happiness: Math.max(stats.happiness, rules.sleep.protectedStatFloor),
-    };
+
+    if (frozenMs > 0) {
+      // Protected portion: hunger DOES decay (sleep rate) but is floored at
+      // protectedStatFloor — never raised UP to the floor if it started
+      // below it (2026-07-20 rebalance — the old behavior froze every stat
+      // completely and could even raise a low stat to the floor). Cleanliness/
+      // happiness are untouched here same as any other sleep segment — sleep
+      // decay never touches them regardless of protection. Floored careNeed
+      // never reaches 0 by construction, so this segment never contributes
+      // to the zero-stat penalty — protection's actual payoff.
+      const hungerStart = stats.hunger;
+      const decayed = applyOfflineDecay(stats, false, frozenMs / 60_000, "sleep", rules);
+      stats = { ...stats, hunger: protectedFloorValue(hungerStart, decayed.hunger, rules.sleep.protectedStatFloor) };
+    }
     if (remainderMs > 0) {
-      // Protection expired mid-gap — sleep decay (and death) resumes for the remainder.
-      stats = applyOfflineDecay(stats, isEggPhase, remainderMs / 60_000, "sleep", rules);
-      const careNeed = isEggPhase ? stats.warmth : stats.hunger;
-      isAlive = careNeed > 0;
+      // Protection expired mid-gap — normal (unfloored) sleep decay and the
+      // zero-stat penalty both resume for the remainder only.
+      penaltyAccum += segmentZeroStatPenalty(stats, stats.hunger, remainderMs / 60_000, "sleep", rules);
+      stats = applyOfflineDecay(stats, false, remainderMs / 60_000, "sleep", rules);
     }
   } else if (prev.isSleeping) {
     // Auto-sleep at close: sleep decay for the entire gap.
+    penaltyAccum += segmentZeroStatPenalty(stats, stats.hunger, totalMs / 60_000, "sleep", rules);
     stats = applyOfflineDecay(stats, isEggPhase, totalMs / 60_000, "sleep", rules);
-    const careNeed = isEggPhase ? stats.warmth : stats.hunger;
-    isAlive = careNeed > 0;
   } else {
     // Awake at close: awake decay only until auto-sleep would have kicked in.
     const idleAtClose = lastTick - new Date(prev.lastInteraction ?? prev.lastFed).getTime();
     const msUntilAutoSleep = Math.max(0, rules.autoSleepMs - idleAtClose);
     const awakeMs = Math.min(totalMs, msUntilAutoSleep);
+    penaltyAccum += segmentZeroStatPenalty(stats, stats.hunger, awakeMs / 60_000, "awake", rules);
     stats = applyOfflineDecay(stats, isEggPhase, awakeMs / 60_000, "awake", rules);
-    let careNeed = isEggPhase ? stats.warmth : stats.hunger;
-    isAlive = careNeed > 0;
 
     const sleepMs = totalMs - awakeMs;
-    if (isAlive && sleepMs > 0) {
+    if (sleepMs > 0) {
+      penaltyAccum += segmentZeroStatPenalty(stats, stats.hunger, sleepMs / 60_000, "sleep", rules);
       stats = applyOfflineDecay(stats, isEggPhase, sleepMs / 60_000, "sleep", rules);
-      careNeed = isEggPhase ? stats.warmth : stats.hunger;
-      isAlive = careNeed > 0;
       sleepingAtEnd = true;
       sleepKindAtEnd = "auto";
       sleepStartedAtEnd = new Date(lastTick + awakeMs).toISOString();
     }
   }
 
-  const mins = totalMs / 60_000;
-  const careNeed = isEggPhase ? stats.warmth : stats.hunger;
-  const penaltyRate =
-    (careNeed < 20 ? 0.5 : 0) +
-    (stats.cleanliness < 20 ? 0.3 : 0) +
-    (stats.happiness < 20 ? 0.2 : 0);
   const floor = prev.carePointsFloor ?? 0;
   const carePoints =
-    wasManualProtected || computeCanEvolve(prev, rules) || rules.progression.disableCarePointDecay
+    computeCanEvolve(prev, rules) || rules.progression.disableCarePointDecay
       ? prev.carePoints
-      : Math.max(floor, prev.carePoints - penaltyRate * mins);
+      : Math.max(floor, prev.carePoints - penaltyAccum);
 
   return {
     hunger: stats.hunger,
@@ -260,11 +326,11 @@ export function replayOfflineGap(
     cleanliness: stats.cleanliness,
     happiness: stats.happiness,
     carePoints,
-    isAlive,
-    isSleeping: isAlive ? sleepingAtEnd : prev.isSleeping,
-    sleepKind: isAlive ? sleepKindAtEnd : prev.sleepKind,
-    sleepStartedAt: isAlive ? sleepStartedAtEnd : prev.sleepStartedAt,
+    isAlive: true,
+    isSleeping: sleepingAtEnd,
+    sleepKind: sleepKindAtEnd,
+    sleepStartedAt: sleepStartedAtEnd,
     lastDecayTick: now.toISOString(),
-    elapsedMinutes: Math.floor(mins),
+    elapsedMinutes: Math.floor(totalMs / 60_000),
   };
 }

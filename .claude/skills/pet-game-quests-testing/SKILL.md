@@ -80,24 +80,64 @@ applies the bonus, earning alone does not.
 - `carePointsFloor` is set to the threshold just crossed on every
   hatch/evolve (`hatchOrEvolve` in `usePetGame.ts`) — "points never decay
   back below the boundary just crossed." This floor is CORRECT for passive
-  neglect decay (`replayOfflineGap`'s `penaltyRate` math also uses
-  `Math.max(floor, ...)`), but **must NOT be applied to a deliberate misuse
-  penalty** (overfeeding, egg overheating) — a penalty a floor silently
-  absorbs is not a penalty. Use `applyCarePointPenalty(carePoints, amount)`
-  (plain `Math.max(0, carePoints - amount)`, no floor) for those instead of
-  `clampCarePointsForProgress`. This exact bug (overfeed penalty being
-  no-op'd by the floor) was found and fixed once already — don't
+  neglect decay (`replayOfflineGap`'s zero-stat penalty math, below, also
+  uses `Math.max(floor, ...)`), but **must NOT be applied to a deliberate
+  misuse penalty** (overfeeding, egg overheating) — a penalty a floor
+  silently absorbs is not a penalty. Use `applyCarePointPenalty(carePoints,
+  amount)` (plain `Math.max(0, carePoints - amount)`, no floor) for those
+  instead of `clampCarePointsForProgress`. This exact bug (overfeed penalty
+  being no-op'd by the floor) was found and fixed once already — don't
   reintroduce it by routing a new penalty through the wrong helper.
+- **Neglect decay is "only-at-zero" (rebalanced 2026-07-20, see
+  `docs/plan-deathDecayMinigameBalance.md` Phase F — supersedes an
+  earlier-that-same-day `<20`-threshold model that turned out too harsh in
+  live testing)**: care points drain ONLY for the minutes a stat sits at
+  EXACTLY 0, at `rules.carePointDecay.perMinutePerZeroStat` (default 0.05,
+  ~3 pts/hour per empty stat) — a merely-low stat (even 1) costs nothing.
+  `decay.ts`'s `minutesAtZero(startValue, ratePerMin, segmentMinutes)`
+  computes this per decay segment from that segment's OWN start value, so a
+  stat that crosses to 0 partway through a segment is only charged for the
+  remainder — summed across all decayed segments into `penaltyAccum`, then
+  `Math.max(floor, prev.carePoints - penaltyAccum)`. Still bounded by
+  `carePointsFloor` — a full week of total neglect costs a bounded amount
+  (whatever's between current points and the floor), never more, no matter
+  how much longer the absence drags on.
+- **Protected (manual tuck-in) sleep decays hunger toward, but never past,
+  `rules.sleep.protectedStatFloor` (10)** while the 72h `protectedMaxMs`
+  window holds — it no longer freezes outright. A stat already below 10 at
+  tuck-in time is left exactly where it is (never raised up to the floor).
+  Cleanliness/happiness are untouched during ANY sleep, protected or not —
+  sleep decay has never touched them (pre-existing, unrelated). Since the
+  floor keeps hunger above 0 for the whole protected portion, it costs zero
+  care points by construction; once the cap lapses mid-gap, the floor lifts
+  and normal decay + the zero-stat penalty resume for the remainder only.
+- **AFK summary** (`usePetGame.ts`'s `afkSummary`/`AfkGapSummary`,
+  `AFK_SUMMARY_MIN_MINUTES = 30`): a dismissible card in GameView ("😴 While
+  you were away (Xh Ym)" + per-stat drops + care points lost) plus a
+  matching Care-history entry, whenever an applied `applyDecay` gap is big
+  enough — wired into all four call sites (initial load, cloud-load, the
+  live tick, `debugTimeJump`). `debugTimeJump` always forces it regardless
+  of the 30-minute floor, specifically so the admin panel can preview it on
+  demand — the fastest way to check this without waiting for a real gap.
 - Overfeed penalty: `-5` care points + `-5` happiness. Egg overheat penalty
   (after a 1s grace window, `eggOverheat.graceMs`): `-0.5` care points/tick +
   `-1` happiness/tick.
-- Poop cleanup (Jul 2026, `poop.ts`'s `POOP_RULES` — tunable placeholders):
-  35% spawn chance per feed, 3 max on screen, cleaning grants `+3` happiness
-  and `2` base care points (wash-category achievement bonus applies) via the
-  normal careAction path — deliberately smaller than a full feed/wash/pet.
-  Counter `poopCleanedCount` is cloud-synced for future achievement tiers
-  (no achievement definition exists yet). Eggs never poop (gated in
-  `shouldSpawnPoop`, unit-tested in poop.test.ts).
+- Poop cleanup (Jul 2026, `poop.ts`'s `POOP_RULES` — tunable placeholders;
+  spawn rate rebalanced 2026-07-20 per `docs/plan-deathDecayMinigameBalance.md`
+  Phase D): **15%** spawn chance per feed (down from an initial 35%), gated
+  by BOTH the 3-max-on-screen cap and a new `minGapMs` (8h) real-time
+  throttle — `shouldSpawnPoop(isEgg, onScreenCount, msSinceLastSpawn, rng)`
+  now takes the elapsed time since the last spawn as its 3rd param (default
+  `Infinity`), since spawn-chance alone can't cap a per-feed-event roll at
+  the intended "~1-2/day" against a very active feeder. Cleaning grants
+  `+3` happiness and `2` base care points (wash-category achievement bonus
+  applies) via the normal careAction path — deliberately smaller than a
+  full feed/wash/pet, and explicitly excluded from qualified-action quest
+  progress (`cleanPoop` in `usePetGame.ts` passes no `recordQuests`
+  transform, unlike feed/wash/pet). Counter `poopCleanedCount` is
+  cloud-synced for future achievement tiers (no achievement definition
+  exists yet). Eggs never poop (gated in `shouldSpawnPoop`, unit-tested in
+  `poop.test.ts`).
 
 ## Part 2: Empirical debugging via the browser-preview-mock technique
 

@@ -6,7 +6,7 @@
 // fire-and-forget trigger).
 import { AnimatePresence, motion } from "framer-motion";
 
-export type PetFxTrigger = "happy" | "eat" | "overfed" | "overheated" | null;
+export type PetFxTrigger = "happy" | "eat" | "overfed" | "overheated" | "distressed" | null;
 
 export interface PetEffectsProps {
   trigger: PetFxTrigger;
@@ -56,21 +56,24 @@ function FloatParticle({ id, emoji, x, delayMs, repeat = false }: FloatProps) {
   );
 }
 
-function SmellWave({ id, x, delayMs }: { id: string; x: number; delayMs: number }) {
+function SmellWave({ id, x, delayMs, small = false }: { id: string; x: number; delayMs: number; small?: boolean }) {
+  // `small` is the nest-slot variant — roughly half-size waves with a
+  // shorter rise so they fit the 46px home slot instead of the pet cell.
+  const rise = small ? [1, -5, -11, -16] : [2, -10, -22, -32];
   return (
     <motion.div
       key={id}
       style={{ position: "absolute", left: "50%", bottom: "78%", pointerEvents: "none" }}
       initial={{ opacity: 0, x, y: 4 }}
-      animate={{ opacity: [0, 0.65, 0.45, 0], x: [x, x - 4, x + 6, x - 3], y: [2, -10, -22, -32] }}
+      animate={{ opacity: [0, 0.65, 0.45, 0], x: [x, x - 4, x + 6, x - 3], y: rise }}
       transition={{ duration: 2.1, delay: delayMs / 1000, repeat: Infinity, ease: "easeInOut" }}
     >
-      <div style={{ display: "flex", gap: 4 }}>
+      <div style={{ display: "flex", gap: small ? 2 : 4 }}>
         <span
           style={{
             display: "block",
-            height: 24,
-            width: 3,
+            height: small ? 12 : 24,
+            width: small ? 2 : 3,
             borderRadius: 999,
             background: "rgba(190,242,100,0.7)",
           }}
@@ -78,14 +81,73 @@ function SmellWave({ id, x, delayMs }: { id: string; x: number; delayMs: number 
         <span
           style={{
             display: "block",
-            height: 20,
-            width: 3,
+            height: small ? 10 : 20,
+            width: small ? 2 : 3,
             borderRadius: 999,
             background: "rgba(110,231,183,0.55)",
           }}
         />
       </div>
     </motion.div>
+  );
+}
+
+/** Compact stink/hunger indicators anchored to the dock's home/nest slot
+ *  while the pet is tucked away (petNested) — the roaming PetEffects
+ *  overlay is hidden then, since its container no longer tracks the dock.
+ *  Same thresholds as PetEffects (cleanliness < 30, careNeed < 25) so the
+ *  two presentations can never disagree. Render inside a
+ *  position:relative wrapper around the slot; overflow must stay visible. */
+export function NestStatusFx({
+  cleanliness,
+  careNeed,
+  isEgg,
+  isSleeping,
+  isAlive,
+}: {
+  cleanliness: number;
+  careNeed: number;
+  isEgg: boolean;
+  isSleeping: boolean;
+  isAlive: boolean;
+}) {
+  if (!isAlive) return null;
+  const smelly = cleanliness < 30;
+  const hungry = !isSleeping && careNeed < 25;
+  if (!smelly && !hungry) return null;
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      {smelly &&
+        [-9, 8].map((xOff, i) => (
+          <SmellWave key={`nest-smell-${i}`} id={`nest-smell-${i}`} x={xOff} delayMs={i * 520} small />
+        ))}
+      <AnimatePresence>
+        {hungry && (
+          <motion.div
+            style={{
+              position: "absolute",
+              top: -16,
+              left: "50%",
+              transform: "translateX(-50%)",
+              whiteSpace: "nowrap",
+              borderRadius: 999,
+              padding: "1px 6px",
+              fontSize: 10,
+              fontWeight: 700,
+              background: "rgba(30,10,10,0.85)",
+              color: "#fecaca",
+              border: "1px solid rgba(248,113,113,0.4)",
+            }}
+            initial={{ opacity: 0, scale: 0.7, y: 4 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.7, y: 4 }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
+          >
+            {isEgg ? "🥶" : "🍔"}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -124,6 +186,14 @@ export function PetEffects({
               delayMs={i * 180}
             />
           ))}
+        {/* One-shot burst the instant hunger bottoms out (Phase C: replaces
+            the old death screen — the pet stays interactive, this just
+            marks the moment neglect became serious). Same shape as the
+            overfeed "sick" burst above. */}
+        {trigger === "distressed" &&
+          [0, 1].map((i) => (
+            <FloatParticle key={`sad-${i}`} id={`sad-${i}`} emoji="😢" x={(i - 0.5) * 26} delayMs={i * 300} />
+          ))}
       </AnimatePresence>
 
       {/* Dirty smell waves — ambient while cleanliness is low and not mid-scrub */}
@@ -161,20 +231,6 @@ export function PetEffects({
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* Death dust */}
-      {!isAlive &&
-        [0, 1, 2, 3].map((i) => (
-          <motion.span
-            key={`dust-${i}`}
-            style={{ position: "absolute", left: "50%", top: "50%", fontSize: 16, pointerEvents: "none" }}
-            initial={{ opacity: 1, x: 0, y: 0 }}
-            animate={{ opacity: 0, x: (i % 2 === 0 ? -1 : 1) * (30 + i * 12), y: -(20 + i * 10) }}
-            transition={{ duration: 1.8, delay: i * 0.15 }}
-          >
-            💀
-          </motion.span>
-        ))}
 
       {/* ZZZ sleeping */}
       {isSleeping &&

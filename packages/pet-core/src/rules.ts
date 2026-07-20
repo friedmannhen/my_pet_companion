@@ -32,10 +32,19 @@ export interface PetEggOverheatRules {
 }
 
 export interface PetSleepRules {
-  /** How long a manual "tuck-in" sleep fully protects the pet (frozen stats, no death). */
+  /** How long a manual "tuck-in" sleep protects the pet (stats floored, no care-point drain). */
   protectedMaxMs: number;
-  /** Stats are floored at this value while protected sleep is active. */
+  /** Stats can't decay below this value while protected sleep is active. */
   protectedStatFloor: number;
+}
+
+export interface PetCarePointDecayRules {
+  /** Care points lost per minute for EACH stat sitting at exactly 0
+   *  (2026-07-20 rebalance: neglect only costs care points once a stat has
+   *  fully bottomed out — low-but-nonzero stats cost nothing). At 0.05
+   *  that's 3 pts/hour per empty stat, 72/day — slow but real, and still
+   *  bounded by carePointsFloor. */
+  perMinutePerZeroStat: number;
 }
 
 export interface PetProgressionRuntimeRules {
@@ -55,6 +64,7 @@ export interface PetRuntimeRules {
   quest: PetQuestRuntimeRules;
   eggOverheat: PetEggOverheatRules;
   sleep: PetSleepRules;
+  carePointDecay: PetCarePointDecayRules;
   progression: PetProgressionRuntimeRules;
 }
 
@@ -109,6 +119,9 @@ export const DEFAULT_PET_RULES: PetRuntimeRules = {
     protectedMaxMs: 72 * 3600_000,
     protectedStatFloor: 10,
   },
+  carePointDecay: {
+    perMinutePerZeroStat: 0.05,
+  },
   progression: {
     disableDailyNormalCap: false,
     disableCarePointBoundary: false,
@@ -130,6 +143,7 @@ export interface PetRuleOverrides {
   actionCooldowns?: Partial<PetActionCooldownRules>;
   quest?: Partial<PetQuestRuntimeRules>;
   sleep?: Partial<PetSleepRules>;
+  carePointDecay?: Partial<PetCarePointDecayRules>;
 }
 
 /** Pure merge of dev/test overrides onto the defaults. Callers gate WHEN this runs. */
@@ -157,6 +171,7 @@ export function mergePetRules(overrides?: PetRuleOverrides): PetRuntimeRules {
     quest: { ...DEFAULT_PET_RULES.quest, ...overrides.quest },
     eggOverheat: { ...DEFAULT_PET_RULES.eggOverheat },
     sleep: { ...DEFAULT_PET_RULES.sleep, ...overrides.sleep },
+    carePointDecay: { ...DEFAULT_PET_RULES.carePointDecay, ...overrides.carePointDecay },
     progression: {
       disableDailyNormalCap:
         overrides.disableDailyNormalCap ?? DEFAULT_PET_RULES.progression.disableDailyNormalCap,

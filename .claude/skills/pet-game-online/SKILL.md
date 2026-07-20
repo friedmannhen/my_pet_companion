@@ -163,12 +163,59 @@ no other realtime plumbing lives in either component.
 ## Minigames (Jul 2026) — RPS (1:1) and Target Toss (room-wide lobby)
 
 **Product rule: minigames grant ZERO progression rewards** (no happiness, no
-care points). Results are logged to local history and persisted per
-`(user_id, game_code)` in `minigame_scores` via the atomic
-`record_minigame_result(p_game_code, p_distance, p_won)` RPC — each
-participant's OWN client calls it exactly once on game over (RLS blocks
-writing anyone else's row). `RoomApi.selfId` exposes the local userId for UI
-that needs "am I the host / is it my turn".
+care points). Results are logged to local history always; lifetime
+`minigame_scores` persistence differs by game (Phase A rewrite,
+2026-07-20, `docs/plan-deathDecayMinigameBalance.md`):
+
+- **RPS and Target Toss are now server-authoritative**, via
+  `minigame_matches`/`minigame_match_submissions` (migration
+  `20260720000000_minigame_matches.sql`) — closes the "call the old
+  self-report RPC with no real opponent" exploit. Every participant agrees
+  on a shared `matchId` (a client-generated `uuid`, threaded through
+  `ActiveMinigame.matchId`/`TargetTossState.matchId` — see "Shared match id"
+  below), calls `create_minigame_match` once (idempotent) when the game
+  starts, then `submit_minigame_result(matchId, payload)` once with their
+  own RAW result (`{move}` for RPS, `{total_distance}` for Toss) when it
+  ends. Submissions are sealed (RLS blocks reading an opponent's pending
+  payload) and the match only resolves — computing winner(s) server-side
+  and folding `games_played`/`games_won`/`games_lost`/`games_tied` into
+  `minigame_scores` for every participant atomically — once ALL
+  participants have submitted. `GameView.tsx`'s `onMinigameResolved` (RPS)
+  and its Target Toss game-over effect/`forfeitToss` are the call sites.
+- **Chess is UNCHANGED** — still self-reports via the original
+  `record_minigame_result(p_game_code, p_distance, p_won)` RPC (each
+  client calls it once on decisive endings only). Left alone deliberately:
+  chess's actual match is already server-tracked in `chess_games` with
+  turn-ownership RLS, so the old self-report gap doesn't apply the same way
+  there.
+
+`RoomApi.selfId` exposes the local userId for UI that needs "am I the host
+/ is it my turn".
+
+### Shared match id (the pattern to reuse for any new server-recorded minigame)
+
+Both/all participants must agree on the SAME `minigame_matches.id` with no
+server round-trip needed to hand it out — solved the same way as the battle
+seed (one side mints it, includes it in a broadcast the other side already
+receives):
+- **RPS**: the ACCEPTOR (not the challenger) mints `crypto.randomUUID()` in
+  `acceptGameInvite()`, includes it in the `minigame {kind:"accept"}`
+  payload, and sets it on their own local `ActiveMinigame.matchId`
+  immediately. The challenger reads `p.matchId` off the received `accept`
+  broadcast and uses that exact same string. Both sides then independently
+  call `create_minigame_match(matchId, "rps", [myId, opponentId])` —
+  idempotent (`on conflict (id) do nothing`), so it doesn't matter whose
+  call reaches the server first.
+- **Target Toss**: the HOST mints the id in `startTossGame()`, includes it
+  in the `mg {kind:"start"}` broadcast alongside the already-shared
+  seed/turn order, and every receiving client reads `p.matchId` off that
+  same broadcast into `TargetTossState.matchId`. Every participant (host
+  included) calls `create_minigame_match(matchId, "target_toss", order)`.
+- **Do not derive a match id from data that might differ slightly between
+  clients** (e.g. each side's own `Date.now()`) — that was the initial
+  design mistake caught before shipping: `startedAt` in `ActiveMinigame` is
+  set independently on each side and the two values differ by network
+  latency, so it can't double as a shared key.
 
 - **RPS** (`minigame` broadcast event, 1:1): invite/accept/decline/move
   handshake mirroring the battle pattern; both clients resolve the same two
@@ -244,7 +291,17 @@ that needs "am I the host / is it my turn".
   (the OLD rounds-won tally) still exist and are unit-tested but are NOT
   what decides the winner anymore — don't reintroduce them into
   `applyTossEvent`'s win-check. Sudden-death tie-breaks still use single-
-  throw lowest-wins (`resolveSuddenDeath`), unchanged.
+  throw lowest-wins (`resolveSuddenDeath`), unchanged. **The server-side
+  match resolver (`submit_minigame_result`) does NOT replicate sudden
+  death** — it only knows the submitted `total_distance` per player, so an
+  exact tie resolves as server-side co-winners rather than running the
+  interactive extra-throw tiebreak; the client-shown result (which DOES run
+  real sudden death) is authoritative for the game itself, this is only a
+  gap in the lifetime `minigame_scores` win/loss bookkeeping for that rare
+  exact-tie case. `minigame_scores.best_score` for `target_toss` also
+  changed meaning: it's now the lowest per-GAME total achieved (matching
+  the winner rule), not the lowest single throw the old
+  `record_minigame_result` call used to record.
 - **Distance/marker/toast reveal is deferred to landing**: `game.lastFx`
   and `game.markers` (useRoom's scoring truth) update the INSTANT the event
   applies, before the slide animation even starts — showing them directly
@@ -297,6 +354,13 @@ silent app-close never resolves anything.
   ONE active participant remains, every remaining client derives
   `winners=[them]` locally (decisive win, NOT the "not enough players"
   cancel — that cancel path now explicitly skips forfeit-driven dwindling).
+  **Server-side score recording is NOT instant on forfeit** (Phase A,
+  2026-07-20): `forfeitToss` submits a `total_distance` inflated by
+  `MISS_PENALTY_DISTANCE` per remaining unplayed round (so the quitter can
+  never accidentally still "win" server-side), but `submit_minigame_result`
+  only resolves the match — and writes `minigame_scores` — once every OTHER
+  participant has also submitted. The local history entry/loss still logs
+  immediately regardless; only the lifetime score-record write is deferred.
 - Battle deliberately has no forfeit (resolves instantly anyway).
 
 ## Chess (Jul 2026 plan Phase 3) — persistent 1:1, DB + broadcast hybrid

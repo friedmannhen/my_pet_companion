@@ -125,7 +125,7 @@ describe("replayOfflineGap", () => {
     expect(out.elapsedMinutes).toBe(180);
   });
 
-  it("manual protected sleep: stats frozen within the protection window", () => {
+  it("manual protected sleep: hunger decays toward the floor (10), cleanliness/happiness untouched", () => {
     const s = saveAt({
       evolutionStage: 1,
       hatched: true,
@@ -136,33 +136,54 @@ describe("replayOfflineGap", () => {
       sleepKind: "manual",
       sleepStartedAt: T0.toISOString(),
     });
-    // 48h gap — inside the 72h protection window.
+    // 48h gap — inside the 72h protection window. Hunger decays at the
+    // normal sleep rate but stops at protectedStatFloor instead of freezing
+    // outright or falling to 0 (2026-07-20 rebalance).
     const now = new Date(T0.getTime() + 48 * 3_600_000);
     const out = replayOfflineGap(s, rules, now)!;
-    expect(out.hunger).toBe(40);
+    expect(out.hunger).toBe(rules.sleep.protectedStatFloor);
     expect(out.cleanliness).toBe(35);
     expect(out.happiness).toBe(30);
     expect(out.isAlive).toBe(true);
-    expect(out.carePoints).toBe(s.carePoints); // frozen while protected
+    expect(out.carePoints).toBe(s.carePoints); // floor keeps hunger > 0 → no penalty
   });
 
-  it("manual protected sleep: decay resumes after the 72h window", () => {
+  it("manual protected sleep: a stat already below the floor at tuck-in isn't raised", () => {
     const s = saveAt({
       evolutionStage: 1,
       hatched: true,
-      hunger: 80,
+      hunger: 6, // already below protectedStatFloor (10)
       isSleeping: true,
       sleepKind: "manual",
       sleepStartedAt: T0.toISOString(),
     });
-    // 72h protected + 10h of sleep decay beyond it: 80 - (1/15)*600 = 40.
-    const now = new Date(T0.getTime() + (72 + 10) * 3_600_000);
+    const now = new Date(T0.getTime() + 24 * 3_600_000);
     const out = replayOfflineGap(s, rules, now)!;
-    expect(out.hunger).toBeCloseTo(80 - (1 / 15) * 10 * 60, 5);
-    expect(out.isAlive).toBe(true);
+    expect(out.hunger).toBe(6); // frozen exactly where it was, never raised to the floor
+    expect(out.carePoints).toBe(s.carePoints);
   });
 
-  it("kills the pet when the care-need stat hits zero during the gap", () => {
+  it("manual protected sleep: floor lifts after the 72h window, remainder decays and charges normally", () => {
+    const s = saveAt({
+      evolutionStage: 1,
+      hatched: true,
+      hunger: 80,
+      carePoints: 1000,
+      isSleeping: true,
+      sleepKind: "manual",
+      sleepStartedAt: T0.toISOString(),
+    });
+    // 72h protected (floors at 10) + 10h (600 min) of UNPROTECTED sleep decay
+    // beyond it: 10 → 0 after 150 of those 600 min, then sits at 0 for the
+    // remaining 450 — only those 450 min cost care points.
+    const now = new Date(T0.getTime() + (72 + 10) * 3_600_000);
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.hunger).toBe(0);
+    expect(out.isAlive).toBe(true);
+    expect(out.carePoints).toBeCloseTo(1000 - rules.carePointDecay.perMinutePerZeroStat * 450, 5);
+  });
+
+  it("hunger clamps at 0 instead of killing the pet (Phase C: death removed)", () => {
     const s = saveAt({
       evolutionStage: 1,
       hatched: true,
@@ -171,11 +192,12 @@ describe("replayOfflineGap", () => {
       sleepKind: "auto",
       sleepStartedAt: T0.toISOString(),
     });
-    // 5 hunger at 1/15 per min → dead after 75 min; give it 3h.
+    // Old behavior: 5 hunger at 1/15 per min → would have "died" after 75
+    // min; give it 3h and confirm it instead just bottoms out at 0, alive.
     const now = new Date(T0.getTime() + 3 * 3_600_000);
     const out = replayOfflineGap(s, rules, now)!;
     expect(out.hunger).toBe(0);
-    expect(out.isAlive).toBe(false);
+    expect(out.isAlive).toBe(true);
   });
 
   it("eggs never sleep: long idle gap ends dormant-but-awake, cooling at the sleep rate", () => {
@@ -214,13 +236,13 @@ describe("replayOfflineGap", () => {
     expect(out.warmth).toBeCloseTo(80 - (1 / 15) * 120, 5);
   });
 
-  it("applies the low-stat care-point penalty for unprotected gaps", () => {
+  it("a low-but-nonzero stat costs nothing (2026-07-20 rebalance: only a zeroed stat drains points)", () => {
     const s = saveAt({
       evolutionStage: 1,
       hatched: true,
-      hunger: 10, // < 20 → 0.5/min penalty (still >0 after 60 min sleep decay)
-      cleanliness: 10, // < 20 → 0.3/min
-      happiness: 10, // < 20 → 0.2/min
+      hunger: 10, // low, but a 60 min sleep-rate decay (4 pts) never reaches 0
+      cleanliness: 10,
+      happiness: 10,
       carePoints: 600,
       isSleeping: true,
       sleepKind: "auto",
@@ -229,6 +251,59 @@ describe("replayOfflineGap", () => {
     const now = new Date(T0.getTime() + 3_600_000); // 60 min
     const out = replayOfflineGap(s, rules, now)!;
     expect(out.isAlive).toBe(true);
-    expect(out.carePoints).toBeCloseTo(600 - (0.5 + 0.3 + 0.2) * 60, 5);
+    expect(out.hunger).toBeGreaterThan(0);
+    expect(out.carePoints).toBe(600); // nothing lost — no stat ever hit 0
+  });
+
+  it("care points drain only for the minutes a stat actually sat at 0, at the flat per-minute rate", () => {
+    const s = saveAt({
+      evolutionStage: 1,
+      hatched: true,
+      hunger: 5, // 5 ÷ (1/15 per min) = 75 min to reach 0
+      carePoints: 1000,
+      isSleeping: true,
+      sleepKind: "auto",
+      sleepStartedAt: T0.toISOString(),
+    });
+    const now = new Date(T0.getTime() + 200 * 60_000); // 200 min
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.hunger).toBe(0);
+    // Zero for 200 - 75 = 125 of the 200 minutes.
+    expect(out.carePoints).toBeCloseTo(1000 - rules.carePointDecay.perMinutePerZeroStat * 125, 5);
+  });
+
+  it("only charges the minutes a stat spent at 0, not the whole segment or gap it's in", () => {
+    // Awake 60 min: hunger 60 → 30, never 0 → this segment costs nothing.
+    // Sleep 500 min: hunger 30 reaches 0 after 450 of those 500 min — only
+    // the last 50 min cost anything. (Guards the same "charged for the
+    // whole absence" shape of bug the pre-rebalance model had, just
+    // re-expressed for the only-at-zero rule.)
+    const s = saveAt({
+      evolutionStage: 1,
+      hatched: true,
+      hunger: 60,
+      cleanliness: 100,
+      happiness: 100,
+      carePoints: 1000,
+    });
+    const now = new Date(T0.getTime() + 560 * 60_000); // 60 awake + 500 sleep
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.hunger).toBe(0);
+    expect(out.carePoints).toBeCloseTo(1000 - rules.carePointDecay.perMinutePerZeroStat * 50, 5);
+  });
+
+  it("multiple zeroed stats stack additively", () => {
+    // All three start at 0 already, for a 10-minute awake segment.
+    const s = saveAt({
+      evolutionStage: 1,
+      hatched: true,
+      hunger: 0,
+      cleanliness: 0,
+      happiness: 0,
+      carePoints: 1000,
+    });
+    const now = new Date(T0.getTime() + 10 * 60_000);
+    const out = replayOfflineGap(s, rules, now)!;
+    expect(out.carePoints).toBeCloseTo(1000 - rules.carePointDecay.perMinutePerZeroStat * 3 * 10, 5);
   });
 });

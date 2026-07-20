@@ -38,7 +38,7 @@ same or a new migration, AND a grant (mirror the pattern in
 | `profiles` | mirrors `auth.users`, display name | `id` (PK, → `auth.users.id`), `email`, `name` |
 | `groups` | friend circles + the singleton Global group | `id`, `name`, `group_type` (`organization\|friend_circle\|custom\|global`), `owner_id`, `invite_code` unique |
 | `group_memberships` | who's in what group | composite PK `(user_id, group_id)`, `role` (`owner\|admin\|member`) |
-| `pets` | one row per user × pet_type — the actual save data | `id`, `user_id`, `pet_type` (`cat\|dog\|dino\|dragon\|ghost\|robot\|phoenix`), stats (`hunger/warmth/cleanliness/happiness` numeric 0-100), `evolution_stage` (0-3), `care_points`, `care_points_floor`, `hatched`, `is_alive`, `is_sleeping`, `sleep_kind`, timestamps (`last_fed/last_washed/last_petted/last_interaction/last_decay_tick/birth_date`), counters (`feed_count/wash_count/pet_count/throw_ball_count/overfeed_count`). `unique(user_id, pet_type)`. Indexed on `care_points desc` (leaderboard) and `user_id`. |
+| `pets` | one row per user × pet_type — the actual save data | `id`, `user_id`, `pet_type` (`cat\|dog\|dino\|dragon\|ghost\|robot\|phoenix`), stats (`hunger/warmth/cleanliness/happiness` numeric 0-100), `evolution_stage` (0-3), `care_points`, `care_points_floor`, `hatched`, `is_alive`, `is_sleeping`, `sleep_kind`, timestamps (`last_fed/last_washed/last_petted/last_interaction/last_decay_tick/birth_date`), counters (`feed_count/wash_count/pet_count/throw_ball_count/overfeed_count`). `unique(user_id, pet_type)`. Indexed on `care_points desc` (leaderboard) and `user_id`. **`is_alive` note (2026-07-20, Phase C of the balance plan): hard death was removed client-side — hunger now clamps at 0 instead of setting this false, so no row this client writes should ever land with `is_alive = false` again.** The column itself is unchanged (no migration) — kept for any pre-existing dead rows, which `usePetGame.ts`'s `reviveIfDead` (in `applyDecay`) flips back to `true` the next time that save loads. |
 | `pet_quest_progress` | quest state | PK `pet_id`, `day_key`, `week_key`, `daily jsonb`, `weekly jsonb`, `completion_counts jsonb` |
 | `quest_reward_history` | append-only claim/expiry log | `quest_code`, `scope` (`daily\|weekly`), `period_key`, `status_at_close` (`claimed\|expired`), `awarded_points`, `discarded_points` |
 | `achievements` | composite PK `(user_id, achievement_code)` | `status` (`claimable\|claimed`), `earned_at`, `claimed_at` |
@@ -169,6 +169,67 @@ default 0` (rides the existing table grant + row upsert like every other
 counter). **Both Jul-16 migrations may not be pushed yet — if pets-row
 upserts suddenly fail with an unknown-column error, check
 `npx supabase migration list --linked` first.**
+
+## Server-authoritative minigame matches (`minigame_matches`, migration `20260720000000`) — Jul 2026
+
+Closes the trust gap `record_minigame_result` always had (any client could
+call it with a fabricated result and no real opponent): RPS and Target Toss
+now route through a match record instead of self-reporting directly.
+**Chess is unaffected — still uses `record_minigame_result`** (its actual
+game is already server-tracked in `chess_games` with turn-ownership RLS, so
+the old gap doesn't apply the same way there).
+
+- **`minigame_matches`**: `id uuid` PK (CLIENT-supplied, not
+  `gen_random_uuid()` — see "shared match id" in the pet-game-online skill
+  for how both/all participants agree on the same one before either calls
+  create), `game_code` (`rps`|`target_toss`, checked), `participant_ids
+  uuid[]`, `status` (`pending`|`resolved`), `winner_ids uuid[]`,
+  `resolved_at`. RLS: `select`/`insert` both gated on `auth.uid() = any
+  (participant_ids)` — **no update policy for `authenticated` at all**,
+  resolution only happens inside `submit_minigame_result`'s definer
+  context (same "RPC-gated writes" shape as `group_memberships`).
+- **`minigame_match_submissions`**: composite PK `(match_id, user_id)`,
+  `payload jsonb` (raw result: `{move}` for rps, `{total_distance}` for
+  target_toss). **Sealed**: the `select` policy only allows reading your
+  OWN row, or (once `minigame_matches.status = 'resolved'`) any
+  participant's row — a player can never see an opponent's pending
+  submission before the match resolves. **No insert/update policy for
+  `authenticated` at all** — writes only happen inside
+  `submit_minigame_result`'s definer context.
+- **`create_minigame_match(p_match_id uuid, p_game_code text,
+  p_participant_ids uuid[]) → void`** — `SECURITY INVOKER`. Validates
+  `game_code`, that rps has exactly 2 participants, that the caller is one
+  of `p_participant_ids`, then `insert ... on conflict (id) do nothing` —
+  idempotent so every participant can safely call it (whoever's insert
+  lands first wins; the row's participant set is identical either way
+  since all callers pass the same set).
+- **`submit_minigame_result(p_match_id uuid, p_payload jsonb) → void`** —
+  `SECURITY DEFINER`. Upserts the caller's submission (`on conflict
+  (match_id, user_id) do update` — a resubmit before resolution just
+  overwrites), then checks whether every participant has now submitted. If
+  not, returns (waiting). If so: computes `winner_ids` — for rps, the two
+  submitted moves via a `beats` lookup jsonb (equal moves = empty
+  `winner_ids`, i.e. a tie); for target_toss, everyone tied for the LOWEST
+  submitted `total_distance` (co-winners on an exact tie — this is a
+  simplification vs. `targetToss.ts`'s real interactive sudden-death
+  tiebreak, which the RPC has no way to run; see the pet-game-online skill)
+  — then atomically flips the match to `resolved` and upserts
+  `games_played`/`games_won`/`games_lost`/`games_tied` for every
+  participant into `minigame_scores` in ONE statement (`insert ... select
+  ... from unnest(participant_ids) ... on conflict (user_id, game_code) do
+  update`). For target_toss it also updates `best_score` to
+  `least(existing, submitted total)` — **`best_score`'s meaning changed**:
+  it's now the lowest per-GAME total achieved, not the lowest single throw
+  the old RPC recorded. Already-resolved matches (a late/duplicate submit)
+  are a no-op, not an error — safe to call defensively.
+- **`minigame_scores` gains `games_lost`/`games_tied` columns** (both
+  `integer not null default 0`) — the old `record_minigame_result` path
+  (chess only, going forward) never writes these, so chess rows will show
+  `0` for both regardless of actual losses/ties; only rps/target_toss rows
+  populate them correctly.
+- **Not pushed as of 2026-07-20** — `npx supabase migration list --linked`
+  will show it pending; RPS/Toss score-recording calls fail gracefully
+  (dbg-logged client-side, gameplay itself is unaffected) until applied.
 
 ## Edge Functions (`supabase/functions/`, Deno) — the session-lease system
 

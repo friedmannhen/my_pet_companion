@@ -32,6 +32,7 @@ import {
   type QuestClaimState,
 } from "@pet/core";
 import houseIcon from "../assets/widget/house.png";
+import { NestStatusFx } from "./PetEffects";
 import settingsIcon from "../assets/widget/widget_settings.png";
 import type { PetGame } from "./usePetGame";
 import type { AuthState } from "../supabase/useAuth";
@@ -512,9 +513,21 @@ function QuestCard({
 }
 
 /** The pet's idle asset shown INSIDE the Home nest slot while the
- *  roaming pet is hidden there (Send Home quiet time). */
-function NestedPetSprite({ petType, stage }: { petType: string; stage: number }) {
+ *  roaming pet is hidden there (Send Home quiet time). Breathing (and the
+ *  occasional wiggle) is applied HERE, directly on the pet's own art —
+ *  not on the circular slot container — so it reads as "the pet is
+ *  breathing," not "the badge/circle is breathing." */
+function NestedPetSprite({
+  petType,
+  stage,
+  wiggle = false,
+}: {
+  petType: string;
+  stage: number;
+  wiggle?: boolean;
+}) {
   const src = spriteFor(petType, stage);
+  const className = wiggle ? "pet-anim-idle-breathe egg-anim-wiggle" : "pet-anim-idle-breathe";
   return src ? (
     <img
       src={src}
@@ -522,11 +535,13 @@ function NestedPetSprite({ petType, stage }: { petType: string; stage: number })
       height={40}
       draggable={false}
       alt=""
-      className="pet-anim-idle-breathe"
+      className={className}
       style={{ pointerEvents: "none", display: "block" }}
     />
   ) : (
-    <span style={{ pointerEvents: "none" }}>{emojiFor(petType)}</span>
+    <span className={className} style={{ pointerEvents: "none", display: "inline-block" }}>
+      {emojiFor(petType)}
+    </span>
   );
 }
 
@@ -706,6 +721,40 @@ export function SideDock({
   const [renameSaved, setRenameSaved] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(auth.displayName ?? "");
   const [displayNameSaved, setDisplayNameSaved] = useState(false);
+  const [restartConfirm, setRestartConfirm] = useState(false);
+
+  // ── Nested-home liveliness + status ──────────────────────────────────
+  // While the pet is tucked in the nest, the house slot (and collapsed
+  // Home tab) breathe constantly and throw an occasional short wiggle at a
+  // random 6–10s cadence.
+  const [nestWiggle, setNestWiggle] = useState(false);
+  useEffect(() => {
+    if (!petNested) return;
+    let cancelled = false;
+    let timer = 0;
+    const schedule = () => {
+      timer = window.setTimeout(() => {
+        if (cancelled) return;
+        setNestWiggle(true);
+        timer = window.setTimeout(() => {
+          if (cancelled) return;
+          setNestWiggle(false);
+          schedule();
+        }, 500);
+      }, 6000 + Math.random() * 4000);
+    };
+    schedule();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      setNestWiggle(false);
+    };
+  }, [petNested]);
+  // Same thresholds as PetEffects' roaming overlay (cleanliness < 30,
+  // careNeed < 25) so slot fx, tab badge, and roaming fx never disagree.
+  const nestCareNeed = game.isEgg ? save.warmth : save.hunger;
+  const nestHungry = petNested && save.isAlive && !save.isSleeping && nestCareNeed < 25;
+  const nestSmelly = petNested && save.isAlive && save.cleanliness < 30;
 
   const saveDisplayName = () => {
     const trimmed = displayNameDraft.trim();
@@ -730,6 +779,7 @@ export function SideDock({
       setDisplayNameDraft(auth.displayName ?? "");
       setRenameSaved(false);
       setDisplayNameSaved(false);
+      setRestartConfirm(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsActive]);
@@ -948,9 +998,15 @@ export function SideDock({
                             : "Your pet's home spot — use the radial menu's 🏠 Send Home, or drag your pet/egg here"
                     }
                   >
+                    <div style={{ position: "relative", width: 46, height: 46, flexShrink: 0 }}>
                     <motion.div
                       data-homeslot
                       onClick={petNested ? onWakeFromNest : undefined}
+                      // Only the hover-scale (drop-target affordance) lives
+                      // on the circle itself — breathing/wiggle happen on
+                      // the pet's own art inside (NestedPetSprite), not
+                      // this container, so the liveliness reads as the pet
+                      // and not the badge.
                       animate={{ scale: petHoverNest ? 1.35 : 1 }}
                       transition={{ type: "spring", stiffness: 420, damping: 20 }}
                       style={{
@@ -981,11 +1037,27 @@ export function SideDock({
                       }}
                     >
                       {petNested ? (
-                        <NestedPetSprite petType={save.petType} stage={save.evolutionStage} />
+                        <NestedPetSprite petType={save.petType} stage={save.evolutionStage} wiggle={nestWiggle} />
                       ) : (
                         "🪺"
                       )}
                     </motion.div>
+                    {/* Stink/hunger indicators anchored to the house while
+                        the pet is inside — the roaming PetEffects overlay
+                        is hidden then (its container parks at a stale
+                        coordinate). Sits OUTSIDE the slot's
+                        overflow:hidden circle so waves/bubble aren't
+                        clipped. */}
+                    {petNested && (
+                      <NestStatusFx
+                        cleanliness={save.cleanliness}
+                        careNeed={nestCareNeed}
+                        isEgg={game.isEgg}
+                        isSleeping={save.isSleeping}
+                        isAlive={save.isAlive}
+                      />
+                    )}
+                    </div>
                   </Tooltip>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
@@ -995,7 +1067,13 @@ export function SideDock({
                       <span style={{ fontSize: 12, opacity: 0.6, flexShrink: 0 }}>{STAGE_NAMES[save.evolutionStage]}</span>
                     </div>
                     <div style={{ fontSize: 11, opacity: 0.5 }}>
-                      {!save.isAlive ? "deceased" : petNested ? "resting in the nest 🪺" : save.isSleeping ? "sleeping 💤" : "awake"}
+                      {petNested
+                        ? "resting in the nest 🪺"
+                        : save.isSleeping
+                          ? "sleeping 💤"
+                          : !game.isEgg && save.hunger <= 0
+                            ? "needs food urgently 😟"
+                            : "awake"}
                     </div>
                   </div>
                 </div>
@@ -1033,6 +1111,26 @@ export function SideDock({
                       rightText={`${Math.floor(save.carePoints)}${nextThreshold !== null ? ` / ${nextThreshold}` : " (max)"}`}
                     />
                   </section>
+
+                  {/* Moved here from Pet Stats (2026-07-20) — this is
+                      status the player should see right away on Home, not
+                      buried in a secondary panel. Reworded for the
+                      rebalanced mechanics: protected sleep no longer
+                      freezes hunger outright, it decays toward (never
+                      past) protectedStatFloor until the window lapses. */}
+                  {save.isSleeping && save.sleepKind === "manual" && save.sleepStartedAt && (
+                    <section style={{ marginBottom: 14 }}>
+                      <h2 style={sectionTitle}>Sleep</h2>
+                      <div style={{ fontSize: 12, opacity: 0.75, lineHeight: 1.5 }}>
+                        🛡️ Tucked in — hunger keeps drifting down but won&apos;t fall below{" "}
+                        {rules.sleep.protectedStatFloor} until{" "}
+                        {new Date(
+                          new Date(save.sleepStartedAt).getTime() + rules.sleep.protectedMaxMs,
+                        ).toLocaleString()}
+                        .
+                      </div>
+                    </section>
+                  )}
 
                   <section style={{ marginBottom: 6 }}>
                     <h2 style={sectionTitle}>Kitchen &amp; toy box</h2>
@@ -1495,6 +1593,32 @@ export function SideDock({
                       ⛔ Quit
                     </button>
                   </div>
+                </section>
+
+                <section style={{ marginBottom: 18 }}>
+                  <h2 style={sectionTitle}>Pet</h2>
+                  {/* Phase C (plan-deathDecayMinigameBalance.md): a voluntary
+                      reset, not the ONLY way back from neglect anymore —
+                      hunger clamping at 0 no longer forces this. Two-click
+                      confirm, same pattern as the group-leave warning above. */}
+                  {restartConfirm ? (
+                    <button
+                      style={{ ...chipStyle, textAlign: "left", background: "rgba(153,27,27,0.45)", color: "#f87171" }}
+                      onClick={() => {
+                        setRestartConfirm(false);
+                        game.restart();
+                      }}
+                    >
+                      ⚠️ Click again to confirm — wipes {save.name}&apos;s progress
+                    </button>
+                  ) : (
+                    <button
+                      style={{ ...chipStyle, textAlign: "left", background: "rgba(248,113,113,0.22)", color: "#fca5a5" }}
+                      onClick={() => setRestartConfirm(true)}
+                    >
+                      🥚 Start over
+                    </button>
+                  )}
                 </section>
 
                 <section style={{ opacity: 0.45, fontSize: 11 }}>
@@ -2148,18 +2272,6 @@ export function SideDock({
                   <Stat label="💩 Poops cleaned" value={save.poopCleanedCount ?? 0} />
                   <Stat label="⚠️ Overfeeds" value={save.overfeedCount} />
                 </section>
-
-                {save.isSleeping && save.sleepKind === "manual" && save.sleepStartedAt && (
-                  <section style={{ marginBottom: 16 }}>
-                    <h2 style={sectionTitle}>Sleep</h2>
-                    <Stat
-                      label="🛡️ Protected until"
-                      value={new Date(
-                        new Date(save.sleepStartedAt).getTime() + rules.sleep.protectedMaxMs,
-                      ).toLocaleString()}
-                    />
-                  </section>
-                )}
               </div>
             ) : null}
               </>
@@ -2243,7 +2355,19 @@ export function SideDock({
               flexShrink: 0,
             }}
           >
-            <img src={houseIcon} alt="" width={26} height={26} draggable={false} style={{ pointerEvents: "none" }} />
+            {/* While the pet is nested the house icon itself breathes so the
+                tab reads as inhabited — wiggle stays on the pet's own
+                sprite only (NestedPetSprite), not this icon, since the
+                house/badge shouldn't wiggle, only the pet inside it. */}
+            <img
+              src={houseIcon}
+              alt=""
+              width={26}
+              height={26}
+              draggable={false}
+              className={petNested ? "pet-anim-idle-breathe" : undefined}
+              style={{ pointerEvents: "none" }}
+            />
             <Tooltip label={game.syncError ?? game.syncStatus} placement={tabTooltipPlacement}>
               <span
                 style={{
@@ -2352,6 +2476,43 @@ export function SideDock({
                 >
                   🪺
                 </span>
+              </Tooltip>
+            )}
+            {/* Nested-care badge — stacked under the 🪺 badge whenever the
+                tucked-away pet needs attention, so neglect stays visible
+                even with the dock collapsed. Hunger/warmth outranks stink
+                when both apply. */}
+            {(nestHungry || nestSmelly) && (
+              <Tooltip
+                label={
+                  nestHungry
+                    ? game.isEgg
+                      ? "The egg in the nest is getting cold — let it out to warm it!"
+                      : `${save.name} is hungry in the nest — open Home to feed them`
+                    : `${save.name} could use a wash — open Home to let them out`
+                }
+                placement={tabTooltipPlacement}
+              >
+                <motion.span
+                  animate={{ scale: [1, 1.18, 1] }}
+                  transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
+                  style={{
+                    position: "absolute",
+                    top: 13,
+                    [isRight ? "right" : "left"]: 1,
+                    minWidth: 14,
+                    height: 14,
+                    borderRadius: 999,
+                    background: "#7f1d1d",
+                    fontSize: 9,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "0 3px",
+                  }}
+                >
+                  {nestHungry ? (game.isEgg ? "🥶" : "🍔") : "💨"}
+                </motion.span>
               </Tooltip>
             )}
           </button>

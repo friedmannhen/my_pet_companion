@@ -22,10 +22,10 @@ import {
   useSpring,
   useTransform,
 } from "framer-motion";
-import { POOP_RULES, shouldSpawnPoop } from "@pet/core";
+import { computeTotalDistances, POOP_RULES, shouldSpawnPoop, TARGET_TOSS_ROUNDS, MISS_PENALTY_DISTANCE } from "@pet/core";
 import type { AuthState } from "../supabase/useAuth";
 import { supabase } from "../supabase/client";
-import { usePetGame } from "./usePetGame";
+import { usePetGame, formatDuration } from "./usePetGame";
 import { EggSelect } from "./EggSelect";
 import { useSessionLease } from "../session/useSessionLease";
 import { usePetMovement } from "./usePetMovement";
@@ -47,7 +47,7 @@ import { RoomBar } from "../online/RoomBar";
 import { TargetToss } from "./minigames/TargetToss";
 import { RockPaperScissors } from "./minigames/RockPaperScissors";
 import { ChessPanel } from "./minigames/Chess";
-import type { ChessGame } from "../online/useRoom";
+import type { ChessGame, RpsMove } from "../online/useRoom";
 import * as Sounds from "./petSounds";
 import { setClickableOverride } from "../overlay/clickableOverride";
 import "./petAnimations.css";
@@ -430,12 +430,21 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     fn();
   }, []);
 
-  // Death knell — plays once on the alive→dead transition.
-  const wasAliveRef = useRef(save.isAlive);
+  // Starvation onset — plays once when hunger bottoms out (Phase C: hard
+  // death was removed, hunger clamps at 0 and stays interactive instead of
+  // ending the save — see plan-deathDecayMinigameBalance.md). Reuses the
+  // same somber cue that used to mark death, since it still fits "this
+  // needs attention now," and the same one-shot-on-transition shape.
+  const isDistressed = !game.isEgg && save.isAlive && save.hunger <= 0;
+  const wasDistressedRef = useRef(isDistressed);
   useEffect(() => {
-    if (wasAliveRef.current && !save.isAlive) sfx(Sounds.playDeath);
-    wasAliveRef.current = save.isAlive;
-  }, [save.isAlive, sfx]);
+    if (!wasDistressedRef.current && isDistressed) {
+      sfx(Sounds.playDeath);
+      setFxTrigger("distressed");
+      setTimeout(() => setFxTrigger((t) => (t === "distressed" ? null : t)), 1800);
+    }
+    wasDistressedRef.current = isDistressed;
+  }, [isDistressed, sfx]);
 
   // Overheat warning particles — burst once as it starts, matching how
   // other one-shot pulses (pulseHappy etc.) already work here.
@@ -461,7 +470,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   }, [save.lastPetted]);
 
   // Hold-to-warm (hub-style egg mini-game).
-  const [warming, setWarming] = useState(false);
   const holdRef = useRef<{ interval?: ReturnType<typeof setInterval>; heldLong: boolean }>({ heldLong: false });
   const gameRef = useRef(game);
   gameRef.current = game;
@@ -470,7 +478,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     const hold = holdRef.current;
     if (hold.interval) clearInterval(hold.interval);
     hold.interval = undefined;
-    setWarming(false);
     // The red overheat glow is only kept fresh by the 200ms warmTick loop —
     // releasing while still at 100 warmth would otherwise leave it stuck on
     // forever (no more ticks to notice warmth dropped/session ended).
@@ -485,7 +492,6 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
       if (!hold.heldLong) {
         hold.heldLong = true;
         gameRef.current.beginWarmSession();
-        setWarming(true);
       }
       expectDeltaRef.current = true;
       gameRef.current.warmTick();
@@ -600,6 +606,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   const poopsRef = useRef(poops);
   poopsRef.current = poops;
   const poopTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  // Real-time throttle backing POOP_RULES.minGapMs — session-only (resets on
+  // reload), matching the rest of the poop mechanic's session-only state.
+  const lastPoopSpawnAtRef = useRef<number>(-Infinity);
   useEffect(
     () => () => {
       poopTimersRef.current.forEach(clearTimeout);
@@ -608,7 +617,9 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
   );
 
   const schedulePoopSpawn = useCallback(() => {
-    if (!shouldSpawnPoop(gameRef.current.isEgg, poopsRef.current.length)) return;
+    const msSinceLastSpawn = Date.now() - lastPoopSpawnAtRef.current;
+    if (!shouldSpawnPoop(gameRef.current.isEgg, poopsRef.current.length, msSinceLastSpawn)) return;
+    lastPoopSpawnAtRef.current = Date.now();
     const delay = POOP_RULES.minDelayMs + Math.random() * (POOP_RULES.maxDelayMs - POOP_RULES.minDelayMs);
     const t1 = setTimeout(() => {
       if (gameRef.current.isEgg || !gameRef.current.save.isAlive) return;
@@ -694,14 +705,18 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     [game, pulseHappy, sfx, dbg],
   );
   const onMinigameResolved = useCallback(
-    (outcome: "win" | "lose" | "tie", opponentName: string) => {
+    (outcome: "win" | "lose" | "tie", opponentName: string, matchId: string, myMove: RpsMove) => {
       // No progression rewards for minigames — just the history log + a
-      // lifetime result row (each client records its OWN result; RLS blocks
-      // writing anyone else's).
+      // server-authoritative match record (Phase A,
+      // plan-deathDecayMinigameBalance.md): each client submits its OWN raw
+      // move, not a self-derived win/loss boolean — the match only resolves
+      // (and minigame_scores updates) once BOTH participants' submissions
+      // are in, computed server-side. Replaces the old direct
+      // record_minigame_result self-report call.
       game.applyMinigameResult(outcome, "Rock-Paper-Scissors");
-      if (supabase) {
+      if (supabase && matchId) {
         void supabase
-          .rpc("record_minigame_result", { p_game_code: "rps", p_distance: null, p_won: outcome === "win" })
+          .rpc("submit_minigame_result", { p_match_id: matchId, p_payload: { move: myMove } })
           .then(({ error }) => {
             if (error) dbg(`minigame score save failed: ${error.message}`);
           });
@@ -892,8 +907,13 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
 
   // Target Toss game over → each participant logs its OWN result exactly
   // once: a history entry (no progression rewards, same rule as RPS) plus a
-  // minigame_scores row via the atomic RPC (p_distance = my best throw of
-  // the main phase, for the lifetime best_score).
+  // submission to the server-authoritative match (Phase A,
+  // plan-deathDecayMinigameBalance.md) — my TOTAL distance across the whole
+  // game (matching targetToss.ts's actual golf-scoring winner rule), not
+  // just my best single throw. The match (and minigame_scores) only
+  // resolves once every participant has submitted; the local win/lose the
+  // UI already shows came from the same deterministic shared-seed replay
+  // every client ran, so it always agrees with the eventual server result.
   const tossRecordedRef = useRef(false);
   useEffect(() => {
     const g = room.tossGame;
@@ -905,14 +925,11 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     if (!g.core.order.includes(auth.userId)) return;
     tossRecordedRef.current = true;
     const won = g.core.winners.includes(auth.userId);
-    const myDistances = g.core.events
-      .filter((e) => e.userId === auth.userId && e.distance !== null)
-      .map((e) => e.distance!);
-    const best = myDistances.length > 0 ? Math.min(...myDistances) : null;
+    const myTotal = computeTotalDistances(g.core.order, g.core.events)[auth.userId] ?? 0;
     game.applyMinigameResult(won ? "win" : "lose", "Target Toss");
-    if (supabase) {
+    if (supabase && g.matchId) {
       void supabase
-        .rpc("record_minigame_result", { p_game_code: "target_toss", p_distance: best, p_won: won })
+        .rpc("submit_minigame_result", { p_match_id: g.matchId, p_payload: { total_distance: myTotal } })
         .then(({ error }) => {
           if (error) dbg(`toss score save failed: ${error.message}`);
         });
@@ -923,21 +940,30 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     }
   }, [room.tossGame, auth.userId, game, pulseHappy, sfx, dbg]);
 
-  // "Give up" in Target Toss: the quitter records their OWN loss (decisive
-  // — mirrors the game-over recording path), then the room broadcasts the
-  // forfeit so remaining players can fast-skip/resolve.
+  // "Give up" in Target Toss: the quitter's local loss records immediately
+  // (history-only, no economy impact either way — Phase B decision), but
+  // the server match can only resolve once EVERY participant has
+  // submitted, so this submits a total inflated by MISS_PENALTY_DISTANCE
+  // for each of my remaining unplayed turns — guarantees I can't still
+  // "win" server-side after quitting, without needing a separate
+  // quit-early RPC path.
   const forfeitToss = useCallback(() => {
     game.applyMinigameResult("lose", "Target Toss");
-    if (supabase) {
+    const g = room.tossGame;
+    if (supabase && g && auth.userId && g.matchId) {
+      const totals = computeTotalDistances(g.core.order, g.core.events);
+      const turnsTaken = g.core.events.filter((e) => e.userId === auth.userId).length;
+      const remainingTurns = Math.max(0, TARGET_TOSS_ROUNDS - turnsTaken);
+      const total = (totals[auth.userId] ?? 0) + remainingTurns * MISS_PENALTY_DISTANCE;
       void supabase
-        .rpc("record_minigame_result", { p_game_code: "target_toss", p_distance: null, p_won: false })
+        .rpc("submit_minigame_result", { p_match_id: g.matchId, p_payload: { total_distance: total } })
         .then(({ error }) => {
           if (error) dbg(`toss forfeit save failed: ${error.message}`);
         });
     }
     room.forfeitTossGame();
     dbg("gave up Target Toss 🏳️");
-  }, [game, room, dbg]);
+  }, [game, room, dbg, auth.userId]);
 
   // Publish my pet's position (normalized to screen fraction so every
   // member's monitor maps it proportionally) while in a room.
@@ -1656,19 +1682,20 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
     );
   };
 
-  // Sprite selection: dead is an emoji (no cat art for that state). The
-  // still-waiting egg is small (EGG_IDLE_SIZE) and flashes/wiggles once
-  // ready to hatch. While the click-gated crack sequence is running
-  // (wiggle/crack1-3), this slot renders nothing — that part of the
-  // cutscene lives in the centered/enlarged hatch stage overlay instead.
-  // The instant the shell bursts, game.isEgg flips false and this slot
-  // goes straight back to rendering the REAL pet (renderPetSprite()) — it
-  // sits right in the shell and later jumps out by animating its own
-  // movement.x/y, never a decorative stand-in.
+  // Sprite selection: the still-waiting egg is small (EGG_IDLE_SIZE) and
+  // flashes/wiggles once ready to hatch. While the click-gated crack
+  // sequence is running (wiggle/crack1-3), this slot renders nothing —
+  // that part of the cutscene lives in the centered/enlarged hatch stage
+  // overlay instead. The instant the shell bursts, game.isEgg flips false
+  // and this slot goes straight back to rendering the REAL pet
+  // (renderPetSprite()) — it sits right in the shell and later jumps out
+  // by animating its own movement.x/y, never a decorative stand-in.
+  // (Phase C removed the dead/🪦 branch that used to live here — hunger
+  // clamping at 0 no longer ends the save, so the pet's own sprite always
+  // renders; distress is communicated via the hunger bubble in PetEffects
+  // and the one-shot "distressed" particle burst above, not a tombstone.)
   let visual: React.ReactNode;
-  if (!save.isAlive) {
-    visual = <span style={{ fontSize: 84, filter: "grayscale(1)" }}>🪦</span>;
-  } else if (game.isEgg && eggPhase === "idle") {
+  if (game.isEgg && eggPhase === "idle") {
     visual = (
       <img
         src={EGG_SPRITES.idle}
@@ -3018,6 +3045,74 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
           </div>
         )}
 
+        {/* AFK summary — "while you were away" recap, shown whenever a big
+            enough decay gap (usePetGame's AFK_SUMMARY_MIN_MINUTES) was just
+            applied (app reopened after a long close, or the machine woke
+            from sleep mid-session). Same dismissible-card shape as the
+            update-ready notice above, one step further up so both can
+            coexist without overlapping. */}
+        {game.afkSummary && (
+          <div
+            data-interactive
+            style={{
+              position: "absolute",
+              bottom: PET_SIZE + 48 + (showUpdateToast ? 40 : 0),
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+              fontSize: 12,
+              padding: "8px 12px",
+              borderRadius: 12,
+              background: "rgba(30,27,50,0.96)",
+              color: "#e9d5ff",
+              boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+              whiteSpace: "nowrap",
+              zIndex: 6,
+              fontFamily: "'Segoe UI', system-ui, sans-serif",
+              pointerEvents: "auto",
+            }}
+          >
+            <span style={{ fontWeight: 700 }}>
+              😴 While you were away ({formatDuration(game.afkSummary.elapsedMinutes)})
+            </span>
+            {(() => {
+              const d = game.afkSummary.deltas;
+              const rows: string[] = [];
+              if (!game.isEgg && d.hunger > 0) rows.push(`🍖 hunger −${Math.round(d.hunger)}`);
+              if (game.isEgg && d.warmth > 0) rows.push(`🔥 warmth −${Math.round(d.warmth)}`);
+              if (d.cleanliness > 0) rows.push(`🧼 cleanliness −${Math.round(d.cleanliness)}`);
+              if (d.happiness > 0) rows.push(`❤️ happiness −${Math.round(d.happiness)}`);
+              if (d.carePoints > 0) rows.push(`⭐ care points −${Math.round(d.carePoints * 10) / 10}`);
+              return rows.length > 0 ? (
+                <span style={{ opacity: 0.85 }}>{rows.join("  ·  ")}</span>
+              ) : (
+                <span style={{ opacity: 0.85 }}>Everything held up fine — nothing lost.</span>
+              );
+            })()}
+            <Tooltip label="Dismiss">
+              <button
+                onClick={game.dismissAfkSummary}
+                style={{
+                  alignSelf: "flex-end",
+                  cursor: "pointer",
+                  border: "none",
+                  borderRadius: 7,
+                  padding: "3px 10px",
+                  marginTop: 2,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: "rgba(233,213,255,0.18)",
+                  color: "#e9d5ff",
+                }}
+              >
+                OK
+              </button>
+            </Tooltip>
+          </div>
+        )}
+
         {/* Notification bubble — the pet "tells" you about friend requests /
             accepts / room invites. Same look as the chat bubble but clickable
             (opens the dock at the relevant view) and independent of any room. */}
@@ -3252,63 +3347,52 @@ export function GameView({ auth, clickable }: { auth: AuthState; clickable: bool
                 {visual}
               </motion.div>
             </motion.div>
-            <PetEffects
-              trigger={fxTrigger}
-              showEvolutionBurst={evolvePulse}
-              isSleeping={save.isSleeping}
-              isAlive={save.isAlive}
-              isEgg={game.isEgg}
-              careNeed={game.isEgg ? save.warmth : save.hunger}
-              cleanliness={save.cleanliness}
-              isCleaningMode={cleaningMode}
-            />
-            {warming && (
+            {/* Hidden while nested: this overlay is anchored to the roaming
+                container, which parks invisibly at a stale snapshot of the
+                nest slot once the pet tucks in — the dock's own
+                NestStatusFx takes over on the home slot instead. */}
+            {!petNested && (
+              // Wrapped in its own positioned+z-indexed layer: PetEffects
+              // itself renders no z-index, so it was stacking behind
+              // RadialMenu (a later DOM sibling within the same pet
+              // container, which establishes the shared stacking context —
+              // later-in-DOM wins by default) whenever the radial menu was
+              // open, clipping/hiding the smell/hunger/cold indicators
+              // right when they'd otherwise be visible. Still
+              // pointerEvents:none via PetEffects' own root, so this never
+              // steals clicks meant for the menu underneath.
+              //
+              // Counter-flip: the parent motion.div applies `scaleX: -1`
+              // when movement.facing === "left" so the sprite turns around.
+              // Without canceling that here, this whole subtree — including
+              // the plain-text hunger/cold speech bubble ("Keep me warm!")
+              // — got mirrored too, rendering the text backwards whenever
+              // the pet happened to be facing left.
               <div
                 style={{
                   position: "absolute",
-                  bottom: -6,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  fontSize: 26,
+                  inset: 0,
+                  zIndex: 50,
                   pointerEvents: "none",
-                  animation: "flame-pulse 0.5s ease-in-out infinite alternate",
+                  transform: movement.facing === "left" ? "scaleX(-1)" : undefined,
                 }}
               >
-                🔥
+                <PetEffects
+                  trigger={fxTrigger}
+                  showEvolutionBurst={evolvePulse}
+                  isSleeping={save.isSleeping}
+                  isAlive={save.isAlive}
+                  isEgg={game.isEgg}
+                  careNeed={game.isEgg ? save.warmth : save.hunger}
+                  cleanliness={save.cleanliness}
+                  isCleaningMode={cleaningMode}
+                />
               </div>
             )}
           </div>
-          <style>{`@keyframes flame-pulse { from { transform: translateX(-50%) scale(0.9); } to { transform: translateX(-50%) scale(1.15); } }`}</style>
         </motion.div>
 
         <AnimatePresence>{showRadial && <RadialMenu key="radial" actions={radialActions} />}</AnimatePresence>
-
-        {!save.isAlive && menuOpen && (
-          <div
-            data-interactive
-            style={{
-              position: "absolute",
-              top: PET_SIZE + 6,
-              left: -40,
-              width: 210,
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              padding: 12,
-              borderRadius: 12,
-              background: "rgba(22,22,28,0.94)",
-              color: "#fff",
-              fontFamily: "'Segoe UI', system-ui, sans-serif",
-              fontSize: 13,
-              boxShadow: "0 4px 18px rgba(0,0,0,0.5)",
-            }}
-          >
-            <span>{save.name} didn&apos;t make it… 💔</span>
-            <button style={chipStyle} onClick={game.restart}>
-              🥚 Start over
-            </button>
-          </div>
-        )}
       </motion.div>
 
       {/* Hatch stage: centered + enlarged (HATCH_SIZE = 1.5x PET_SIZE),

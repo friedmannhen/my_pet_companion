@@ -29,6 +29,7 @@ import {
   replayOfflineGap,
   type EvolutionStage,
   type HistoryEntry,
+  type HistoryEventCategory,
   type PetQuestCode,
   type PetQuestState,
   type PetSaveData,
@@ -50,6 +51,10 @@ const SAVE_KEY = "mpc_pet_save_cat";
 // currently-authenticating userId.
 const SAVE_OWNER_KEY = "mpc_pet_save_owner";
 const TICK_MS = 60_000;
+/** Below this, a gap is just normal play/short-tick noise — no "while you
+ *  were away" card. debugTimeJump bypasses this (always shows, so the
+ *  admin-panel test harness can preview it on demand). */
+const AFK_SUMMARY_MIN_MINUTES = 30;
 // Quest day/week boundaries anchor to the PLAYER'S OWN local timezone (not
 // the hardcoded Israel-business-hours default in pet-core, which is a
 // carry-over from the original ERP widget's deployment) — computed once,
@@ -66,11 +71,43 @@ function loadSave(): PetSaveData {
   return freshPetSave({ petType: "cat" }, undefined, calendar);
 }
 
-function applyDecay(save: PetSaveData): PetSaveData {
-  const out = replayOfflineGap(save, rules);
-  if (!out) return save;
-  return {
-    ...save,
+/**
+ * Phase C (plan-deathDecayMinigameBalance.md): hard death was removed going
+ * forward — replayOfflineGap now clamps hunger/warmth at 0 instead of
+ * flipping isAlive false. This is the one-time recovery for a save that was
+ * ALREADY dead under the old rules (isAlive: false in storage/cloud):
+ * replayOfflineGap short-circuits on a dead save (by design, so it never
+ * re-processes one), so without this a legacy dead save would stay dead
+ * forever with no path back. Revives into the same distressed state a
+ * from-now-on starving pet would show (stats untouched, just alive again)
+ * and resets lastDecayTick so live ticking resumes from this moment.
+ */
+function reviveIfDead(save: PetSaveData): PetSaveData {
+  if (save.isAlive) return save;
+  return { ...save, isAlive: true, lastDecayTick: new Date().toISOString() };
+}
+
+/** "While you were away" gap summary — surfaced as a dismissible card
+ *  (GameView) and a history entry whenever an applied decay gap is long
+ *  enough to matter (AFK_SUMMARY_MIN_MINUTES). Deltas are `before - after`
+ *  (positive = lost). */
+export interface AfkGapSummary {
+  elapsedMinutes: number;
+  deltas: {
+    hunger: number;
+    warmth: number;
+    cleanliness: number;
+    happiness: number;
+    carePoints: number;
+  };
+}
+
+function applyDecay(save: PetSaveData): { save: PetSaveData; summary: AfkGapSummary | null } {
+  const revived = reviveIfDead(save);
+  const out = replayOfflineGap(revived, rules);
+  if (!out) return { save: revived, summary: null };
+  const next: PetSaveData = {
+    ...revived,
     hunger: out.hunger,
     warmth: out.warmth,
     cleanliness: out.cleanliness,
@@ -81,6 +118,56 @@ function applyDecay(save: PetSaveData): PetSaveData {
     sleepKind: out.sleepKind,
     sleepStartedAt: out.sleepStartedAt,
     lastDecayTick: out.lastDecayTick,
+  };
+  return {
+    save: next,
+    summary: {
+      elapsedMinutes: out.elapsedMinutes,
+      deltas: {
+        hunger: revived.hunger - next.hunger,
+        warmth: revived.warmth - next.warmth,
+        cleanliness: revived.cleanliness - next.cleanliness,
+        happiness: revived.happiness - next.happiness,
+        carePoints: revived.carePoints - next.carePoints,
+      },
+    },
+  };
+}
+
+/** 1 decimal, integers shown bare — small module-level formatter so both
+ *  the lazy useState initializer (before any hook-scoped helper exists) and
+ *  later call sites can build the same label text. */
+function fmt1(n: number): string {
+  const r = Math.round(n * 10) / 10;
+  return Number.isInteger(r) ? String(r) : r.toFixed(1);
+}
+
+/** Exported for the AFK card (GameView.tsx) — same "5h 12m" shape used in
+ *  the matching history-entry label. */
+export function formatDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  if (h <= 0) return `${m}m`;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** History-entry shape for an AFK gap — "penalty" (⚠️) when it cost care
+ *  points, otherwise "care" (💛), matching the existing icon convention. */
+function describeAfkGap(summary: AfkGapSummary, isEgg: boolean): { category: HistoryEventCategory; label: string } {
+  const { deltas } = summary;
+  const parts: string[] = [];
+  if (isEgg) {
+    if (deltas.warmth > 0) parts.push(`warmth −${fmt1(deltas.warmth)}`);
+  } else if (deltas.hunger > 0) {
+    parts.push(`hunger −${fmt1(deltas.hunger)}`);
+  }
+  if (deltas.cleanliness > 0) parts.push(`cleanliness −${fmt1(deltas.cleanliness)}`);
+  if (deltas.happiness > 0) parts.push(`happiness −${fmt1(deltas.happiness)}`);
+  if (deltas.carePoints > 0) parts.push(`⭐ −${fmt1(deltas.carePoints)}`);
+  const detail = parts.length > 0 ? ` — ${parts.join(", ")}` : "";
+  return {
+    category: deltas.carePoints > 0 ? "penalty" : "care",
+    label: `While away ${formatDuration(summary.elapsedMinutes)}${detail}`,
   };
 }
 
@@ -96,6 +183,10 @@ interface QuestProgressRow {
 
 export interface PetGame {
   save: PetSaveData;
+  /** Set whenever a big-enough decay gap (AFK_SUMMARY_MIN_MINUTES+) was just
+   *  applied — drives the dismissible "while you were away" card. */
+  afkSummary: AfkGapSummary | null;
+  dismissAfkSummary: () => void;
   syncStatus: SyncStatus;
   /** The last Postgres/PostgREST error message, if syncStatus === "error". */
   syncError: string | null;
@@ -156,14 +247,49 @@ export type SyncStatus = "offline" | "loading" | "synced" | "error";
 export function usePetGame(userId: string | null): PetGame {
   // Offline catch-up + quest-period rollover happen once at load, before
   // first render uses the save.
-  const [save, setSave] = useState<PetSaveData>(() =>
-    normalizeQuestPeriods(applyDecay(loadSave()), new Date(), calendar),
-  );
+  // Lazy initializers run once, in declaration order, during the first
+  // render — the ref hand-off lets the afkSummary initializer below see the
+  // same applyDecay() call's summary without recomputing/duplicating it.
+  const initialAfkSummaryRef = useRef<AfkGapSummary | null>(null);
+  const [save, setSave] = useState<PetSaveData>(() => {
+    const { save: decayed, summary } = applyDecay(loadSave());
+    initialAfkSummaryRef.current = summary;
+    return normalizeQuestPeriods(decayed, new Date(), calendar);
+  });
+  const [afkSummary, setAfkSummary] = useState<AfkGapSummary | null>(() => {
+    const s = initialAfkSummaryRef.current;
+    return s && s.elapsedMinutes >= AFK_SUMMARY_MIN_MINUTES ? s : null;
+  });
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("offline");
   const [syncError, setSyncError] = useState<string | null>(null);
   const saveRef = useRef(save);
   saveRef.current = save;
   const petIdRef = useRef<string | null>(null);
+
+  /** Surfaces a gap summary (card + history entry) only when it's long
+   *  enough to matter, or unconditionally when `force` (debugTimeJump). */
+  const maybeSetAfkSummary = useCallback(
+    (summary: AfkGapSummary | null, isEgg: boolean, force = false) => {
+      if (!summary || (!force && summary.elapsedMinutes < AFK_SUMMARY_MIN_MINUTES)) return;
+      setAfkSummary(summary);
+      const { category, label } = describeAfkGap(summary, isEgg);
+      setSave((prev) => appendHistoryEntry(prev, { category, label }));
+    },
+    [],
+  );
+  const dismissAfkSummary = useCallback(() => setAfkSummary(null), []);
+  // The initial-load summary (if any) already seeded `afkSummary` state
+  // above via the ref hand-off — this just adds the matching history entry
+  // once on mount (can't safely setSave from inside another hook's lazy
+  // initializer, so it's deferred here instead).
+  useEffect(() => {
+    if (!initialAfkSummaryRef.current) return;
+    const summary = initialAfkSummaryRef.current;
+    if (summary.elapsedMinutes < AFK_SUMMARY_MIN_MINUTES) return;
+    const { category, label } = describeAfkGap(summary, save.evolutionStage === 0);
+    setSave((prev) => appendHistoryEntry(prev, { category, label }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const achievements = useAchievements(userId, save);
   const multRef = useRef(achievements.multipliers);
@@ -219,8 +345,9 @@ export function usePetGame(userId: string | null): PetGame {
         // locally-cached log over (when it's actually this account's), or
         // the cloud-authoritative load would silently wipe it on every
         // sign-in.
+        const { save: decayedRow, summary: cloudGapSummary } = applyDecay(rowToSave(row));
         let loaded = {
-          ...applyDecay(rowToSave(row)),
+          ...decayedRow,
           history: localIsMine ? (saveRef.current.history ?? []) : [],
         };
         // Quest progress rides in its own row (pets table stays scalar).
@@ -246,6 +373,7 @@ export function usePetGame(userId: string | null): PetGame {
           };
         }
         setSave(normalizeQuestPeriods(loaded, new Date(), calendar));
+        maybeSetAfkSummary(cloudGapSummary, loaded.evolutionStage === 0);
       } else {
         // No cloud row yet: the cached local save is only a trustworthy seed
         // when it's this account's own — otherwise start genuinely fresh
@@ -322,14 +450,22 @@ export function usePetGame(userId: string | null): PetGame {
 
   // Live decay tick — same replay path as offline catch-up, plus passive
   // quest progress (guardian/focus minutes, clean-run cutoff) for the one
-  // awake minute that just elapsed.
+  // awake minute that just elapsed. Reads saveRef (kept in sync every
+  // render, line ~250) rather than a setSave updater, so applyDecay's
+  // summary can drive maybeSetAfkSummary without nesting a second setState
+  // inside the first's updater. Normally this is a harmless 1-minute gap
+  // (no summary); a late-firing interval after the machine woke from sleep
+  // can replay a much bigger one, which is exactly when the AFK card
+  // should show up.
   useEffect(() => {
-    const id = setInterval(
-      () => setSave((prev) => evaluatePassiveQuests(applyDecay(prev), rules, new Date(), calendar, 1)),
-      TICK_MS,
-    );
+    const id = setInterval(() => {
+      const { save: decayed, summary } = applyDecay(saveRef.current);
+      const minutes = summary ? Math.max(1, summary.elapsedMinutes) : 1;
+      setSave(evaluatePassiveQuests(decayed, rules, new Date(), calendar, minutes));
+      maybeSetAfkSummary(summary, decayed.evolutionStage === 0);
+    }, TICK_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [maybeSetAfkSummary]);
 
   const isEgg = save.evolutionStage === 0;
 
@@ -697,9 +833,14 @@ export function usePetGame(userId: string | null): PetGame {
   }, []);
 
   // Minigames grant NO progression rewards (product decision, Jul 2026) —
-  // results are only logged locally and persisted to minigame_scores (via
-  // record_minigame_result, called by the room layer) for future
-  // achievements/leaderboards.
+  // results are only logged locally. Lifetime results persist to
+  // minigame_scores via GameView.tsx's call sites: chess still calls
+  // record_minigame_result directly (self-report, out of scope for the
+  // Phase A rewrite — its actual match is already server-tracked in
+  // chess_games with turn-ownership RLS); RPS and Target Toss go through
+  // the server-authoritative create_minigame_match/submit_minigame_result
+  // pair instead (Phase A, plan-deathDecayMinigameBalance.md) so a solo
+  // scripted call with no real opponent can no longer credit a win.
   const applyMinigameResult = useCallback((outcome: "win" | "lose" | "tie", gameName: string) => {
     setSave((prev) => {
       if (!prev.isAlive) return prev;
@@ -760,8 +901,9 @@ export function usePetGame(userId: string | null): PetGame {
    * — so cooldown-gated things actually clear when you jump forward far
    * enough), then replays decay.
    */
-  const debugTimeJump = useCallback((hours: number) => {
-    setSave((prev) => {
+  const debugTimeJump = useCallback(
+    (hours: number) => {
+      const prev = saveRef.current;
       const shiftMs = hours * 3_600_000;
       const shift = (iso: string) => new Date(new Date(iso).getTime() - shiftMs).toISOString();
       const quests = prev.quests
@@ -781,7 +923,7 @@ export function usePetGame(userId: string | null): PetGame {
             },
           }
         : prev.quests;
-      return applyDecay({
+      const { save: decayed, summary } = applyDecay({
         ...prev,
         lastDecayTick: shift(prev.lastDecayTick),
         lastInteraction: shift(prev.lastInteraction),
@@ -791,8 +933,13 @@ export function usePetGame(userId: string | null): PetGame {
         sleepStartedAt: prev.sleepStartedAt ? shift(prev.sleepStartedAt) : undefined,
         quests,
       });
-    });
-  }, []);
+      setSave(decayed);
+      // Always show (force: true) regardless of AFK_SUMMARY_MIN_MINUTES —
+      // this IS the "preview the AFK card" test harness.
+      maybeSetAfkSummary(summary, decayed.evolutionStage === 0, true);
+    },
+    [maybeSetAfkSummary],
+  );
 
   /** Instantly clears every cooldown/gap (petting UI cooldown, quest
    * qualified-action gaps) without touching stats/decay — a quick "test the
@@ -844,6 +991,8 @@ export function usePetGame(userId: string | null): PetGame {
 
   return {
     save,
+    afkSummary,
+    dismissAfkSummary,
     syncStatus,
     syncError,
     isEgg,
